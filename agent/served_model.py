@@ -2,12 +2,13 @@
 
 A LiteLLM-style proxy answers with the configured alias in the body's ``model`` field and puts
 the deployment it really routed to in a response header (``x-litellm-model-id``, else the
-upstream ``x-litellm-model-api-base``). The OpenAI SDK's parsed objects drop headers, so the
-capture rides an ``httpx`` response hook on the client Hermes builds for the agent; it stores
-the header onto ``agent.last_served_model`` (``None`` when the response carried none, so a
-value never outlives the request that produced it). Consumers: ``agent/turn_finalizer.py``
-(result ``served_model`` / ``requested_model``) and the opt-in gateway footer field
-``served_model`` (``gateway/runtime_footer.py``). Fail-open everywhere.
+upstream ``x-litellm-model-api-base``). Also supports Bifrost routing headers
+(``X-Bifrost-Provider`` and ``X-Bifrost-Resolved-Model``). The OpenAI SDK's parsed objects drop
+headers, so the capture rides an ``httpx`` response hook on the client Hermes builds for the
+agent; it stores the header onto ``agent.last_served_model`` (``None`` when the response carried
+none, so a value never outlives the request that produced it). Consumers:
+``agent/turn_finalizer.py`` (result ``served_model`` / ``requested_model``) and the opt-in
+gateway footer field ``served_model`` (``gateway/runtime_footer.py``). Fail-open everywhere.
 """
 
 from __future__ import annotations
@@ -17,7 +18,11 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-SERVED_MODEL_HEADERS: tuple[str, ...] = ("x-litellm-model-id", "x-litellm-model-api-base")
+SERVED_MODEL_HEADERS: tuple[str, ...] = (
+    "x-litellm-model-id",
+    "x-litellm-model-api-base",
+    "x-bifrost-resolved-model",
+)
 _HOOK_MARK = "_hermes_served_model_hook"
 
 
@@ -28,7 +33,12 @@ def served_model_from_headers(headers: Any) -> Optional[str]:
     for name in SERVED_MODEL_HEADERS:
         value = headers.get(name)
         if value not in (None, ""):
-            return str(value).strip()
+            resolved = str(value).strip()
+            if name == "x-bifrost-resolved-model":
+                provider = headers.get("x-bifrost-provider")
+                if provider not in (None, ""):
+                    return f"{str(provider).strip()}/{resolved}"
+            return resolved
     return None
 
 
