@@ -120,7 +120,13 @@ VALID_HOOKS: set[str] = {
     # pre_verify: once per turn when the agent edited code and is about to verify/finish. Return
     # {"action": "continue", "message"} (or Claude-Code Stop {"decision": "block", "reason"}) to keep
     # going; anything else finishes. Bounded by agent.max_verify_nudges.
-    "pre_verify", "pre_api_request", "post_api_request", "api_request_error",
+    "pre_verify",
+    # local patch: pre_stop — once per turn when the model stops with a text answer, with NO
+    # file-edit condition (unlike pre_verify). Return {"action": "continue", "message"} (or a
+    # Claude-Code Stop {"decision": "block", "reason"}) to continue the turn; anything else finishes.
+    # Bounded by agent.max_stop_continuations (default 20). Generic: carries no goal-loop logic.
+    "pre_stop",
+    "pre_api_request", "post_api_request", "api_request_error",
     # pre/post_auxiliary_call: once per physical provider attempt of an auxiliary LLM call
     # (agent/auxiliary_hooks.py — titling, compression, MoA, vision, approval, ...). Same payload
     # shape as pre/post_api_request plus ``aux_task``; distinct events so turn-scoped
@@ -1262,6 +1268,27 @@ def get_pre_verify_continue_message(
     hook_results = invoke_hook(
         "pre_verify", session_id=session_id, platform=platform, model=model, coding=coding,
         attempt=attempt, final_response=final_response, changed_paths=list(changed_paths or []),
+    )
+    for result in hook_results:
+        if not isinstance(result, dict):
+            continue
+        action = str(result.get("action") or result.get("decision") or "").strip().lower()
+        message = result.get("message") or result.get("reason")
+        if action in ("continue", "block") and isinstance(message, str) and message.strip():
+            return message.strip()
+    return None
+
+
+def get_pre_stop_continue_message(
+    *, session_id: str = "", platform: str = "", attempt: int = 0, final_response: str = "",
+) -> Optional[str]:
+    """local patch: check generic ``pre_stop`` hooks for ``{"action": "continue", "message"}`` (or a
+    Claude-Code Stop ``{"decision": "block", "reason"}``) to keep a text-answer turn going with no
+    file edit; first non-empty message wins, any other return lets the turn finish. ``attempt`` lets
+    hooks self-throttle."""
+    hook_results = invoke_hook(
+        "pre_stop", session_id=session_id, platform=platform, attempt=attempt,
+        final_response=final_response,
     )
     for result in hook_results:
         if not isinstance(result, dict):
