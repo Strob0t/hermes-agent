@@ -723,6 +723,13 @@ def _run_user_message(raw_input, _openai_error) -> tuple:
         user_message = raw_input
     else:
         user_message = raw_input[-1].get("content", "") if isinstance(raw_input, list) else ""
+    if isinstance(user_message, list):
+        # local patch: validate parts like the chat route; text-only parts collapse to a str
+        from gateway.platforms.api_server import _multimodal_validation_error, _normalize_multimodal_content
+        try:
+            user_message = _normalize_multimodal_content(user_message)
+        except ValueError as exc:
+            return None, _multimodal_validation_error(exc, param=f"input[{len(raw_input) - 1}].content")
     if not user_message:
         return None, _json_error(_openai_error, "No user message found in input", status=400)
     return user_message, None
