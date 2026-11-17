@@ -1072,6 +1072,10 @@ _MAX_KEEP_TOOL_IMAGES = 3
 # floor eats the reclaimed headroom and compaction re-fires every 1-2 turns.
 _SMALL_CTX_WINDOW_LIMIT = 512_000
 _SMALL_CTX_THRESHOLD_PERCENT = 0.75
+# ctx-window patch: the trigger is a line from the configured threshold at _CURVE_LARGE_WINDOW to
+# _CURVE_SMALL_PERCENT at MINIMUM_CONTEXT_LENGTH (replaces the 512K / 75 % floor above).
+_CURVE_LARGE_WINDOW = 1_000_000
+_CURVE_SMALL_PERCENT = 0.85
 
 
 _PATH_MENTION_RE = re.compile(r"(?:/|~/?|[A-Za-z]:\\)[^\s`'\")\]}<>]+")
@@ -2613,10 +2617,14 @@ class ContextCompressor(
 
     @staticmethod
     def _effective_threshold_percent(context_length: int, threshold_percent: float) -> float:
-        """Raise-only small-context threshold floor: models under 512K trigger at >= 75%."""
-        if context_length and context_length < _SMALL_CTX_WINDOW_LIMIT:
-            return max(threshold_percent, _SMALL_CTX_THRESHOLD_PERCENT)
-        return threshold_percent
+        """Raise-only trigger curve: the configured threshold at 1M and above, 85 % at the smallest window,
+        linear between them."""
+        if not context_length or context_length >= _CURVE_LARGE_WINDOW or threshold_percent >= _CURVE_SMALL_PERCENT:
+            return threshold_percent
+        if context_length <= MINIMUM_CONTEXT_LENGTH:
+            return _CURVE_SMALL_PERCENT
+        share = (_CURVE_LARGE_WINDOW - context_length) / (_CURVE_LARGE_WINDOW - MINIMUM_CONTEXT_LENGTH)
+        return threshold_percent + (_CURVE_SMALL_PERCENT - threshold_percent) * share
 
     @staticmethod
     def _effective_input_window(context_length: int, max_tokens: int | None) -> int:
@@ -4012,6 +4020,11 @@ Write only the summary body. Do not include any preamble or prefix."""
         """Return whether *message* contains user input worth anchoring."""
         return _turns._is_actionable_user_turn(message)
 
+    @staticmethod
+    def _is_api_inbound_user_turn(message: Any) -> bool:
+        """local patch: an API client turn is stored as internal_notification, but it is human input."""
+        return _turns._is_api_inbound_user_turn(message)
+
     @classmethod
     def _blank_echo_indices_after(cls, messages: list[dict[str, Any]], user_idx: int) -> set[int]:
         """Return contiguous blank echoes after a user event; removable only if an assistant follows."""
@@ -4030,7 +4043,8 @@ Write only the summary body. Do not include any preamble or prefix."""
         candidates: list[str] = []
         for msg in reversed(messages):
             # display_kind notices are operational traffic, not user intent.
-            if msg.get("role") != "user" or cls._is_synthetic_compression_user_turn(msg) or msg.get("display_kind"):
+            if msg.get("role") != "user" or cls._is_synthetic_compression_user_turn(msg) or (
+                    msg.get("display_kind") and not cls._is_api_inbound_user_turn(msg)):
                 continue
             text = _redact_compaction_text(_typed_user_text(_content_text_for_contains(msg.get("content"))).strip())
             if not text:
@@ -4366,12 +4380,13 @@ Write only the summary body. Do not include any preamble or prefix."""
         if last_user_idx < 0:
             return None
 
-        for msg in reversed(messages[last_user_idx + 1:]):
+        # local patch: a final answer anywhere after the ask finishes it, also when a notice or its tool
+        # round follows (upstream scanned only the transcript end); a provisional verify answer does not
+        for msg in messages[last_user_idx + 1:]:
             if not isinstance(msg, dict) or msg.get("role") != "assistant":
-                # Trailing tool result (or anything else): still mid-task.
-                break
-            if msg.get("tool_calls"):
-                break
+                continue
+            if msg.get("tool_calls") or msg.get("finish_reason") in {"verification_required", "verify_hook_continue"}:
+                continue
             if _content_text_for_contains(msg.get("content")).strip():
                 # Final answer already delivered — replaying the ask would
                 # hand the model finished work as a fresh instruction.
