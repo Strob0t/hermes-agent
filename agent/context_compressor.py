@@ -4178,9 +4178,17 @@ Write only the summary body. Do not include any preamble or prefix."""
         # and must not anchor the tail or seed auto-focus. Mirrors is_user_originated_turn.
         # A /steer row is typed for the renderer and the alternation repair, but it IS human input.
         display_kind = message.get("display_kind")
-        if (display_kind and display_kind != STEER_DISPLAY_KIND) or cls._is_context_summary_message(message):
+        if (display_kind and display_kind != STEER_DISPLAY_KIND and not cls._is_api_inbound_user_turn(message)) \
+                or cls._is_context_summary_message(message):
             return False
         return not cls._is_blank_user_turn(message)
+
+    @staticmethod
+    def _is_api_inbound_user_turn(message: Any) -> bool:
+        """local patch: an API client turn is stored as internal_notification, but it is human input."""
+        metadata = message.get("display_metadata") if isinstance(message, dict) else None
+        return (message.get("display_kind") == "internal_notification" and isinstance(metadata, dict)
+                and metadata.get("api_inbound") is True)
 
     @classmethod
     def _blank_echo_indices_after(cls, messages: list[dict[str, Any]], user_idx: int) -> set[int]:
@@ -4200,7 +4208,8 @@ Write only the summary body. Do not include any preamble or prefix."""
         candidates: list[str] = []
         for msg in reversed(messages):
             # display_kind notices are operational traffic, not user intent.
-            if msg.get("role") != "user" or cls._is_synthetic_compression_user_turn(msg) or msg.get("display_kind"):
+            if msg.get("role") != "user" or cls._is_synthetic_compression_user_turn(msg) or (
+                    msg.get("display_kind") and not cls._is_api_inbound_user_turn(msg)):
                 continue
             text = _redact_compaction_text(_typed_user_text(_content_text_for_contains(msg.get("content"))).strip())
             if not text:
@@ -4591,12 +4600,13 @@ Write only the summary body. Do not include any preamble or prefix."""
         if last_user_idx < 0:
             return None
 
-        for msg in reversed(messages[last_user_idx + 1:]):
+        # local patch: a final answer anywhere after the ask finishes it, also when a notice or its tool
+        # round follows (upstream scanned only the transcript end); a provisional verify answer does not
+        for msg in messages[last_user_idx + 1:]:
             if not isinstance(msg, dict) or msg.get("role") != "assistant":
-                # Trailing tool result (or anything else): still mid-task.
-                break
-            if msg.get("tool_calls"):
-                break
+                continue
+            if msg.get("tool_calls") or msg.get("finish_reason") in {"verification_required", "verify_hook_continue"}:
+                continue
             if _content_text_for_contains(msg.get("content")).strip():
                 # Final answer already delivered — replaying the ask would
                 # hand the model finished work as a fresh instruction.

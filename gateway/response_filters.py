@@ -226,7 +226,8 @@ def persisted_user_metadata_for_event(event: Any) -> dict:
     """The user row's display metadata: ``display_metadata_for_event`` plus the canonical admission's
     ``submission_id``, which lets a client match a send whose ack it never received to its stored row."""
     from gateway.session_display import admission_submission
-    return {**display_metadata_for_event(event), **admission_submission(event)}
+    api_inbound = {"api_inbound": True} if (getattr(event, "metadata", None) or {}).get("api_inbound") else {}
+    return {**display_metadata_for_event(event), **admission_submission(event), **api_inbound}
 
 
 def is_machinery_display_kind(display_kind: Any) -> bool:
