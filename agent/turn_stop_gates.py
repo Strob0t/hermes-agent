@@ -77,6 +77,26 @@ def _pre_verify_nudge(agent, final_response, attempt: int) -> Optional[str]:
     return None
 
 
+def _pre_stop_nudge(agent, final_response, attempt: int) -> Optional[str]:
+    """local patch: a generic ``pre_stop`` hook may keep the turn going when the model stops with a
+    text answer, with NO file-edit condition (unlike ``_pre_verify_nudge``). Bounded by
+    ``agent.max_stop_continuations``. Carries no goal-loop logic; a plugin owns the policy."""
+    try:
+        from agent.verify_hooks import max_stop_continuations
+        from hermes_cli.lifecycle import has_hook
+        from hermes_cli.plugins import get_pre_stop_continue_message
+
+        if has_hook("pre_stop") and attempt < max_stop_continuations():
+            return get_pre_stop_continue_message(
+                session_id=getattr(agent, "session_id", None) or "",
+                platform=getattr(agent, "platform", "") or "",
+                attempt=attempt, final_response=final_response,
+            )
+    except Exception:
+        logger.debug("pre_stop hook check failed", exc_info=True)
+    return None
+
+
 def _kanban_stop_nudge(agent, messages) -> Optional[str]:
     """Workers must end with a terminal board tool (kanban_complete / kanban_block /
     kanban_request_review / kanban_request_changes); a narrated stop is recorded
@@ -215,6 +235,19 @@ def apply_stop_gates(
             "⚠️ Kanban worker tried to exit without a terminal board call "
             "(kanban_complete/kanban_request_review/kanban_block) — nudging to finish"
         )
+        return verdict
+
+    # local patch: generic pre_stop gate — a plugin may continue a text-answer turn with no file edit
+    _stop_attempt = getattr(agent, "_pre_stop_nudges", 0)
+    _stop_nudge = _pre_stop_nudge(agent, final_response, _stop_attempt)
+    if _stop_nudge:
+        agent._pre_stop_nudges = _stop_attempt + 1
+        final_msg["finish_reason"] = "stop_hook_continue"
+        _append_interim_answer(
+            agent, final_msg, messages, conversation_history, "pre_stop interim flush failed"
+        )
+        verdict = _continue(_stop_nudge, "_pre_stop_synthetic")
+        logger.debug("pre_stop nudge issued (attempt %d)", agent._pre_stop_nudges)
         return verdict
     return StopGateVerdict(
         continue_turn=False, final_response=final_response,
