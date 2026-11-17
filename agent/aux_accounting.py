@@ -76,7 +76,7 @@ def record_aux_usage(
         model = str(getattr(response, "model", "") or "") or "unknown"
         estimated_cost = None
         try:
-            cost = estimate_usage_cost(model, usage, provider=provider, base_url=base_url)
+            cost = estimate_usage_cost(model, usage, provider=provider, base_url=None)
             if cost.amount_usd is not None:
                 estimated_cost = float(cost.amount_usd)
         except Exception:
