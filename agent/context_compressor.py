@@ -1152,6 +1152,10 @@ _MAX_KEEP_TOOL_IMAGES = 3
 # floor eats the reclaimed headroom and compaction re-fires every 1-2 turns.
 _SMALL_CTX_WINDOW_LIMIT = 512_000
 _SMALL_CTX_THRESHOLD_PERCENT = 0.75
+# ctx-window patch: the trigger is a line from the configured threshold at _CURVE_LARGE_WINDOW to
+# _CURVE_SMALL_PERCENT at MINIMUM_CONTEXT_LENGTH (replaces the 512K / 75 % floor above).
+_CURVE_LARGE_WINDOW = 1_000_000
+_CURVE_SMALL_PERCENT = 0.85
 
 
 _PATH_MENTION_RE = re.compile(r"(?:/|~/?|[A-Za-z]:\\)[^\s`'\")\]}<>]+")
@@ -2752,10 +2756,14 @@ class ContextCompressor(
 
     @staticmethod
     def _effective_threshold_percent(context_length: int, threshold_percent: float) -> float:
-        """Raise-only small-context threshold floor: models under 512K trigger at >= 75%."""
-        if context_length and context_length < _SMALL_CTX_WINDOW_LIMIT:
-            return max(threshold_percent, _SMALL_CTX_THRESHOLD_PERCENT)
-        return threshold_percent
+        """Raise-only trigger curve: the configured threshold at 1M and above, 85 % at the smallest window,
+        linear between them."""
+        if not context_length or context_length >= _CURVE_LARGE_WINDOW or threshold_percent >= _CURVE_SMALL_PERCENT:
+            return threshold_percent
+        if context_length <= MINIMUM_CONTEXT_LENGTH:
+            return _CURVE_SMALL_PERCENT
+        share = (_CURVE_LARGE_WINDOW - context_length) / (_CURVE_LARGE_WINDOW - MINIMUM_CONTEXT_LENGTH)
+        return threshold_percent + (_CURVE_SMALL_PERCENT - threshold_percent) * share
 
     @staticmethod
     def _effective_input_window(context_length: int, max_tokens: int | None) -> int:

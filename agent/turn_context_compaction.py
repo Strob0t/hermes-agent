@@ -136,6 +136,10 @@ def run_turn_start_compaction(
         messages=messages, active_system_prompt=active_system_prompt,
         conversation_history=conversation_history, current_turn_user_idx=current_turn_user_idx,
     )
+    # ctx-window patch: the compressor of this new agent starts with the window of the alias row; use the window
+    # of the model that served the session last
+    from agent.served_model import apply_session_window
+    apply_session_window(agent)
     _idle_compaction(agent, out, system_message, user_message, effective_task_id)
     _preflight_compression(agent, out, system_message, user_message, effective_task_id)
     return out

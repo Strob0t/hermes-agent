@@ -161,6 +161,10 @@ class GatewayTurnHygieneMixin:
             hs.model, base_url=hs.base_url or "", api_key=hs.api_key or "",
             config_context_length=hs.config_context_length, provider=hs.provider or "",
         )
+        # ctx-window patch: the check uses the window of the model that served this session last
+        from agent.served_model import session_window_or
+        _hyg_context_length = session_window_or(
+            _hyg_context_length, session_key, getattr(session_entry, "session_id", None))
         _compress_token_threshold = int(_hyg_context_length * hs.threshold_pct)
         _warn_token_threshold = int(_hyg_context_length * 0.95)
         _msg_count = len(history)
