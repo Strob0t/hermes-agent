@@ -41,13 +41,14 @@ jobs:
   rebase-check:
     runs-on: ubuntu-latest
     env:
-      PATCH_BRANCH: ${{ github.ref_name }}
+      PATCH_BRANCH: goal-loop-patches
       BASE_TAG: ${{ github.event.inputs.base_tag || 'v0.23.2' }}
       UPSTREAM: https://github.com/NousResearch/hermes-agent.git
     steps:
       - name: Checkout the patch branch (full history)
         uses: actions/checkout@v4
         with:
+          ref: goal-loop-patches
           fetch-depth: 0
 
       - name: Add upstream and fetch
