@@ -77,14 +77,34 @@ def _pre_stop_nudge(agent, final_response, attempt: int) -> Optional[str]:'''),
 ]
 
 
+# A marker that ONLY this patch introduces, so the idempotence check never mistakes pristine text
+# for a patched file. The old marker `conversation_id: str = ""` also occurs in the pristine
+# hermes_cli/plugins.py (an unrelated middleware_trace dispatcher), so it aborted on a clean tree
+# and the patch never applied in the image build.
+PATCHED_MARKERS = {
+    "hermes_cli/plugins.py": "final_response=final_response, conversation_id=conversation_id,",
+    "agent/turn_stop_gates.py": "_conversation_id_safe",
+    "agent/turn_finalizer.py": 'payload["conversation_id"] = _conversation_id_safe(agent)',
+}
+
+
+def already_patched(rel: str, text: str) -> bool:
+    """True when this patch's own output is present. `_conversation_id_safe` covers the two files
+    that get the helper; plugins.py uses the unique forwarded-arg line. A pristine tree is never
+    matched, so the patch applies exactly once and a re-run aborts cleanly."""
+    if "_conversation_id_safe" in text:
+        return True
+    marker = PATCHED_MARKERS.get(rel)
+    return bool(marker) and marker in text
+
+
 def main():
     texts = {}
     for rel, old, new in PATCHES:
         if rel not in texts:
             with open(f"{ROOT}/{rel}", encoding="utf-8") as f:
                 texts[rel] = f.read()
-            if "_conversation_id_safe" in texts[rel] or (
-                    rel == "hermes_cli/plugins.py" and "conversation_id: str = \"\"," in texts[rel]):
+            if already_patched(rel, texts[rel]):
                 sys.exit(f"patch does not apply: {rel} is already patched")
         count = texts[rel].count(old)
         if count != 1:
