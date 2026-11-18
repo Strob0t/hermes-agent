@@ -1,0 +1,184 @@
+name: upstream-rebase-check
+
+# Keep the goal-loop patch series rebasable on new upstream Hermes releases.
+#
+# It tries to rebase this branch's patch commits (everything on top of the base tag) onto a target
+# upstream tag, then runs the local-tests. The outcomes:
+#   - rebase conflict  -> an upstream change touched our patch lines: open an issue with the reject.
+#   - rebase clean but local-tests fail -> upstream moved the behaviour around our lines: open an issue.
+#   - rebase clean and local-tests pass -> open a draft PR with the rebased branch for review.
+#   - target == base (nothing new upstream) -> no-op.
+# It never pushes to the patch branch and never merges on its own. A human reviews the draft PR.
+#
+# Needs the repo to have a git remote-less checkout; the workflow adds the upstream remote itself.
+# Enable "Allow GitHub Actions to create and approve pull requests" in the repo settings for the
+# draft-PR path (the issue path only needs the default GITHUB_TOKEN).
+
+on:
+  schedule:
+    - cron: "17 6 * * 1"   # Monday 06:17 UTC, weekly
+  workflow_dispatch:
+    inputs:
+      base_tag:
+        description: "Base tag the patch series sits on (series = base_tag..this branch)"
+        required: false
+        default: "v0.23.2"
+      target_ref:
+        description: "Upstream ref to rebase onto; empty = NousResearch latest release tag"
+        required: false
+        default: ""
+
+permissions:
+  contents: write        # push the rebased probe branch for the draft PR
+  issues: write          # open the conflict / test-failure issue
+  pull-requests: write   # open the draft PR
+
+concurrency:
+  group: upstream-rebase-check
+  cancel-in-progress: false
+
+jobs:
+  rebase-check:
+    runs-on: ubuntu-latest
+    env:
+      PATCH_BRANCH: goal-loop-patches
+      BASE_TAG: ${{ github.event.inputs.base_tag || 'v0.23.2' }}
+      UPSTREAM: https://github.com/NousResearch/hermes-agent.git
+    steps:
+      - name: Checkout the patch branch (full history)
+        uses: actions/checkout@v4
+        with:
+          ref: goal-loop-patches
+          fetch-depth: 0
+
+      - name: Add upstream and fetch
+        run: |
+          git config user.name "Strob0t"
+          git config user.email "steffen.staubach+claude@gmail.com"
+          git remote add upstream "$UPSTREAM" || true
+          git fetch --tags upstream
+          git fetch upstream
+
+      - name: Resolve the target ref
+        id: target
+        run: |
+          IN="${{ github.event.inputs.target_ref }}"
+          if [ -n "$IN" ]; then
+            TARGET="$IN"
+          else
+            # NousResearch latest release tag
+            TARGET=$(curl -fsSL -H "Authorization: Bearer ${{ github.token }}" \
+              -H "Accept: application/vnd.github+json" \
+              https://api.github.com/repos/NousResearch/hermes-agent/releases/latest \
+              | python3 -c "import json,sys;print(json.load(sys.stdin).get('tag_name',''))")
+          fi
+          if [ -z "$TARGET" ]; then echo "could not resolve target ref" >&2; exit 1; fi
+          # Resolve to a commit sha the local repo knows (fetch the tag if needed)
+          git fetch --tags upstream "$TARGET" || true
+          SHA=$(git rev-parse --verify "refs/tags/$TARGET^{commit}" 2>/dev/null \
+                || git rev-parse --verify "$TARGET^{commit}" 2>/dev/null \
+                || git rev-parse --verify "upstream/$TARGET" 2>/dev/null || true)
+          if [ -z "$SHA" ]; then echo "target $TARGET not found in upstream" >&2; exit 1; fi
+          echo "target=$TARGET"     >> "$GITHUB_OUTPUT"
+          echo "target_sha=$SHA"    >> "$GITHUB_OUTPUT"
+          echo "Target: $TARGET ($SHA)"
+
+      - name: Skip when the target equals the base (nothing new)
+        id: gate
+        run: |
+          BASE_SHA=$(git rev-parse --verify "refs/tags/${BASE_TAG}^{commit}")
+          if [ "$BASE_SHA" = "${{ steps.target.outputs.target_sha }}" ]; then
+            echo "target equals base tag ${BASE_TAG}; nothing to do."
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          else
+            N=$(git rev-list --count "${BASE_TAG}..HEAD")
+            echo "patch series = $N commits on ${BASE_TAG}..${PATCH_BRANCH}"
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Dry-run rebase onto the target
+        id: rebase
+        if: steps.gate.outputs.proceed == 'true'
+        run: |
+          set +e
+          PROBE="probe/rebase-${{ steps.target.outputs.target }}"
+          git branch -f "$PROBE" "$PATCH_BRANCH"
+          git checkout "$PROBE"
+          git rebase --onto "${{ steps.target.outputs.target_sha }}" "${BASE_TAG}" "$PROBE" > rebase.out 2>&1
+          RC=$?
+          echo "probe_branch=$PROBE" >> "$GITHUB_OUTPUT"
+          if [ $RC -ne 0 ]; then
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Conflicting files"; echo '```'
+              git diff --name-only --diff-filter=U
+              echo '```'; echo "## Rebase output (which patch stopped)"; echo '```'
+              tail -40 rebase.out
+              echo '```'
+            } > report.md
+            git rebase --abort
+          else
+            echo "result=clean" >> "$GITHUB_OUTPUT"
+            { echo "## Rebased patch series (clean)"; echo '```'
+              git log --oneline "${{ steps.target.outputs.target_sha }}..$PROBE"
+              echo '```'; } > report.md
+          fi
+          set -e
+
+      # local-tests import the patched modules; aiohttp is their only third-party need.
+      - name: Set up Python (for local-tests)
+        if: steps.rebase.outputs.result == 'clean'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+
+      - name: Install aiohttp
+        if: steps.rebase.outputs.result == 'clean'
+        run: pip install "aiohttp==3.14.5"
+
+      - name: Run local-tests on the rebased tree
+        id: tests
+        if: steps.rebase.outputs.result == 'clean'
+        run: |
+          set +e
+          git checkout "${{ steps.rebase.outputs.probe_branch }}"
+          python3 -m unittest discover -s local-tests -p 'test_*.py' > tests.out 2>&1
+          RC=$?
+          echo "--- local-tests tail ---"; tail -20 tests.out
+          if [ $RC -ne 0 ]; then echo "result=fail" >> "$GITHUB_OUTPUT"; else echo "result=pass" >> "$GITHUB_OUTPUT"; fi
+          set -e
+        env:
+          HERMES_DISABLE_LAZY_INSTALLS: "1"
+
+      - name: Open an issue on conflict or failing tests
+        if: steps.rebase.outputs.result == 'conflict' || steps.tests.outputs.result == 'fail'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ steps.target.outputs.target }}
+        run: |
+          KIND="${{ steps.rebase.outputs.result == 'conflict' && 'rebase conflict' || 'local-tests failed' }}"
+          TITLE="upstream-rebase-check: $KIND rebasing onto $TARGET"
+          # idempotent: do not duplicate an open issue with the same title
+          EXISTING=$(gh issue list --state open --search "in:title \"$TITLE\"" --json number --jq 'length')
+          if [ "$EXISTING" != "0" ]; then echo "issue already open, skipping"; exit 0; fi
+          BODY="report.md"
+          [ -f tests.out ] && { echo; echo "## local-tests output"; echo '```'; tail -40 tests.out; echo '```'; } >> "$BODY"
+          echo "" >> "$BODY"
+          echo "Branch \`$PATCH_BRANCH\` does not rebase cleanly / green onto upstream \`$TARGET\`. A patch of the series needs a human to re-apply it. See A (rebase-on-release) in build/hermes/README.md." >> "$BODY"
+          gh issue create --title "$TITLE" --body-file "$BODY" --label "upstream-rebase" || \
+          gh issue create --title "$TITLE" --body-file "$BODY"
+
+      - name: Push the rebased branch and open a draft PR on success
+        if: steps.tests.outputs.result == 'pass'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TARGET: ${{ steps.target.outputs.target }}
+          PROBE: ${{ steps.rebase.outputs.probe_branch }}
+        run: |
+          git push -f origin "$PROBE"
+          TITLE="upstream-rebase-check: clean rebase onto $TARGET (review)"
+          EXISTING=$(gh pr list --state open --head "$PROBE" --json number --jq 'length')
+          if [ "$EXISTING" != "0" ]; then echo "draft PR already open"; exit 0; fi
+          gh pr create --draft --base "$PATCH_BRANCH" --head "$PROBE" \
+            --title "$TITLE" \
+            --body-file report.md
