@@ -42,6 +42,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PATCH_BRANCH: goal-loop-patches
+      # gh prefers a remote named 'upstream' when it picks the repo; pin it to this fork
+      GH_REPO: ${{ github.repository }}
       BASE_TAG: ${{ github.event.inputs.base_tag || 'v0.23.2' }}
       UPSTREAM: https://github.com/NousResearch/hermes-agent.git
     steps:
