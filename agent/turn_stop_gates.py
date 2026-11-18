@@ -77,6 +77,17 @@ def _pre_verify_nudge(agent, final_response, attempt: int) -> Optional[str]:
     return None
 
 
+def _conversation_id_safe(agent) -> str:
+    """local patch: the compression-stable conversation root for plugin hooks; never raises, so a
+    failed lineage walk only drops the field (hooks then fall back to ``session_id``)."""
+    try:
+        from agent.prompt_cache_scope import conversation_id
+        return conversation_id(agent) or ""
+    except Exception:
+        logger.debug("conversation_id lookup failed", exc_info=True)
+        return ""
+
+
 def _pre_stop_nudge(agent, final_response, attempt: int) -> Optional[str]:
     """local patch: a generic ``pre_stop`` hook may keep the turn going when the model stops with a
     text answer, with NO file-edit condition (unlike ``_pre_verify_nudge``). Bounded by
@@ -91,6 +102,7 @@ def _pre_stop_nudge(agent, final_response, attempt: int) -> Optional[str]:
                 session_id=getattr(agent, "session_id", None) or "",
                 platform=getattr(agent, "platform", "") or "",
                 attempt=attempt, final_response=final_response,
+                conversation_id=_conversation_id_safe(agent),
             )
     except Exception:
         logger.debug("pre_stop hook check failed", exc_info=True)

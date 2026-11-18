@@ -1281,14 +1281,16 @@ def get_pre_verify_continue_message(
 
 def get_pre_stop_continue_message(
     *, session_id: str = "", platform: str = "", attempt: int = 0, final_response: str = "",
+    conversation_id: str = "",
 ) -> Optional[str]:
     """local patch: check generic ``pre_stop`` hooks for ``{"action": "continue", "message"}`` (or a
     Claude-Code Stop ``{"decision": "block", "reason"}``) to keep a text-answer turn going with no
     file edit; first non-empty message wins, any other return lets the turn finish. ``attempt`` lets
-    hooks self-throttle."""
+    hooks self-throttle. ``conversation_id`` is the compression-stable root, so a plugin can key
+    per-conversation state that survives a compaction (which rotates ``session_id``)."""
     hook_results = invoke_hook(
         "pre_stop", session_id=session_id, platform=platform, attempt=attempt,
-        final_response=final_response,
+        final_response=final_response, conversation_id=conversation_id,
     )
     for result in hook_results:
         if not isinstance(result, dict):

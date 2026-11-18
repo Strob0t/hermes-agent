@@ -546,6 +546,13 @@ def apply_llm_output_transform(
     transformed, pre_transform = False, None
     payload = dict(response_text=final_response, session_id=agent.session_id or "", model=agent.model,
                    platform=platform, turn_id=turn_id)  # turn_id: per-turn identity for the hook callback gate
+    # local patch: the compression-stable conversation root, so a plugin keyed on it still finds its
+    # state after a compaction rotated session_id; dropped (not fatal) if the lineage walk fails.
+    try:
+        from agent.turn_stop_gates import _conversation_id_safe
+        payload["conversation_id"] = _conversation_id_safe(agent)
+    except Exception:
+        payload["conversation_id"] = ""
     held = getattr(agent, "_held_transforms", None) if getattr(agent, "_hold_stream", False) else None
     if held:
         rewrite = _run_held_transforms(held, payload, logger)
