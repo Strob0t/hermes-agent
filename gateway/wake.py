@@ -267,7 +267,10 @@ async def _self_post_chat_completion(adapter: Any, *, text: str, session_id: str
     url = f"http://{host}:{port}/v1/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "X-Hermes-Session-Id": session_id}
     payload = {"model": str(getattr(adapter, "_model_name", "") or "hermes-agent"),
-               "messages": [{"role": "user", "content": text}], "stream": False}
+               "messages": [{"role": "user", "content": text}], "stream": False,
+               # local patch: marks the turn as a gateway wake, not a client message, so the session
+               # authority does not tag its user row api_inbound (the flag can only lower trust).
+               "hermes_wake": True}
     if notification_category == "diagnostic":
         payload["hermes_notification_category"] = "diagnostic"
     last_err: Optional[BaseException] = None

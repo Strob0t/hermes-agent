@@ -961,6 +961,10 @@ class OpenAICompatRoutesMixin:
         # above still applies; it grants no internal ingress or control authority.
         if provided_session_id and body.get("hermes_notification_category") == "diagnostic":
             run_kwargs["notification_category"] = "diagnostic"
+        # local patch: a gateway wake self-post (gateway/wake.py) is no client message; the flag
+        # only removes the api_inbound tag of the user row, so a client that sends it gains nothing.
+        if provided_session_id and body.get("hermes_wake") is True:
+            run_kwargs["wake_turn"] = True
         if stream:
             _stream_q = ThreadSafeAsyncQueue()
             # tool_call_ids with an emitted "running": a "completed" without one (internal/
@@ -1010,7 +1014,7 @@ class OpenAICompatRoutesMixin:
         outcome, err = await self._run_idempotent(
             request, body, _compute_completion, log_label="chat completions",
             fingerprint_keys=["model", "provider", "model_options", "messages", "tools", "tool_choice", "stream",
-                              "hermes_notification_category"],
+                              "hermes_notification_category", "hermes_wake"],
             route="chat_completions",
         )
         if err is not None:
