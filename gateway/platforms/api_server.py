@@ -3636,7 +3636,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         session_history_delivery: str = "", turn_author: Optional[dict[str, Any]] = None,
         relay_metadata: Optional[dict[str, Any]] = None, notification_category: str = "result",
         resume_unanswered_turn: bool = False, approval_notify_callback=None,
-        approval_session_key: Optional[str] = None, walked_from: Optional[str] = None) -> tuple:
+        approval_session_key: Optional[str] = None, walked_from: Optional[str] = None,
+        wake_turn: bool = False) -> tuple:
         """Create an agent and run one turn in a thread executor -> ``(result, usage)``.
         ``approval_notify_callback`` (with ``approval_session_key``) routes dangerous-command
         approval requests to the caller's stream, keyed like ``/v1/runs`` approvals (#51871).
@@ -3666,7 +3667,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 bind_declared_conversation=bind_declared_conversation, request_id=request_id, run_owner_scope=run_owner_scope,
                 history_from_session=history_from_session, session_history_delivery=session_history_delivery,
                 turn_author=turn_author, resume_unanswered_turn=resume_unanswered_turn, relay_metadata=relay_metadata,
-                approval_notify_callback=approval_notify_callback, approval_session_key=approval_session_key)
+                approval_notify_callback=approval_notify_callback, approval_session_key=approval_session_key,
+                wake_turn=wake_turn)
         loop = asyncio.get_running_loop()
         # ContextVars do not follow run_in_executor threads: capture here, re-enter in _run().
         request_profile = _api_request_profile.get()

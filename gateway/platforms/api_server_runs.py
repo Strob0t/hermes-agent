@@ -696,6 +696,7 @@ async def run_internal_session_turn(self, *, session_id: str, text: str, profile
                 gateway_session_key=None, **overrides, route=route, requested_runtime={},
                 route_source="global", session_history_delivery="1",
                 notification_category=notification_category,
+                wake_turn=True,  # local patch: a wake is no client message (no api_inbound tag)
             )
             return
         raise RuntimeError(

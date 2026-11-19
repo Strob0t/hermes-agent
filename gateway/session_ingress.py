@@ -121,6 +121,12 @@ async def admit_message(authority, event):
             del adopters[receipt.admission_id]
 
 
+def _is_client_api_turn(event, prepared) -> bool:
+    """local patch: True for an API row a client sent, False for a self-injected event and for a
+    gateway wake self-post (``wake_turn`` from gateway/wake.py), which only re-uses the API door."""
+    return not event.internal and not (prepared or {}).get('wake_turn')
+
+
 def _marker_adopters(authority):
     adopters = getattr(authority, 'marker_adopters', None)
     if adopters is None:
@@ -373,8 +379,9 @@ async def execute_admission(authority, ref, row):
                     # ``[Image attached ...]`` hints native transports persist), not only the caption.
                     event.text = '\n'.join(part['text'] for part in prepared['content'] if part.get('type') == 'text')
                 event.allow_gateway_control = False
-                if not event.internal:
-                    # local patch: a client turn, not a self-injected one; compaction anchors on it
+                if _is_client_api_turn(event, prepared):
+                    # local patch: a client turn, not a self-injected one and not a gateway wake
+                    # self-post (gateway/wake.py); compaction and plugins anchor on it
                     event.metadata['api_inbound'] = True
                 event.internal = True  # trust comes from the private binding and preclaim, never client JSON
             response = await authority.runner._handle_message(event)

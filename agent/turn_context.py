@@ -922,9 +922,13 @@ def _collect_pre_llm_call_context(
         return ""
     try:
         from hermes_cli.lifecycle import invoke_hook as _invoke_hook
+        # local patch: the compression-stable conversation root, so a plugin can key per-conversation
+        # state that survives a compaction which rotates session_id; "" if the lineage walk fails.
+        from agent.turn_stop_gates import _conversation_id_safe
         _pre_results = _invoke_hook(
             "pre_llm_call",
             session_id=agent.session_id,
+            conversation_id=_conversation_id_safe(agent),
             task_id=effective_task_id,
             turn_id=turn_id,
             user_message=original_user_message,
