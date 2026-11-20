@@ -672,6 +672,9 @@ _PER_TURN_RESET_STATE: tuple[tuple[str, Any], ...] = (
     ("_iteration_budget_warning_injected", False),
     ("_run_budget_wrapup_injected", False), ("_verification_stop_nudges", 0),
     ("_pre_verify_nudges", 0), ("_lsp_turn_end_notes", 0),
+    # local patch: the generic pre_stop gate counts continuations per turn; an agent that the
+    # API server keeps for a session must start each turn at 0, or the gate never fires again.
+    ("_pre_stop_nudges", 0),
 )
 
 
