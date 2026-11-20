@@ -120,6 +120,29 @@ class GateContinueTest(unittest.TestCase):
         self.assertEqual(agent._pre_stop_nudges, 2)
 
 
+class PerTurnResetTest(unittest.TestCase):
+    def test_the_continuation_counter_is_reset_at_turn_start(self):
+        """The API server keeps one agent per session: a turn that used the full bound must not
+        leave the counter at the bound for the next turn (goal-loop finding F-stop)."""
+        from agent.turn_context import _PER_TURN_RESET_STATE
+        self.assertIn(("_pre_stop_nudges", 0), _PER_TURN_RESET_STATE)
+
+    def test_a_new_turn_can_continue_again_after_the_bound(self):
+        from agent.turn_context import _PER_TURN_RESET_STATE
+        agent = FakeAgent()
+        agent._pre_stop_nudges = 20
+        for name, value in _PER_TURN_RESET_STATE:
+            if name == "_pre_stop_nudges":
+                setattr(agent, name, value)
+        messages = [{"role": "user", "content": "next turn"}]
+        with patch("hermes_cli.lifecycle.has_hook", return_value=True), \
+             patch("hermes_cli.plugins.get_pre_stop_continue_message", return_value="again"), \
+             patch("agent.verify_hooks.max_stop_continuations", return_value=20):
+            verdict = run_gates(agent, messages)
+        self.assertTrue(verdict.continue_turn)
+        self.assertEqual(agent._pre_stop_nudges, 1)
+
+
 class GateNoOpTest(unittest.TestCase):
     def test_no_plugin_hook_means_no_behaviour_change(self):
         """With no pre_stop hook registered (has_hook False), the gate is a no-op: the turn finishes
