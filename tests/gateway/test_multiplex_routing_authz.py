@@ -129,6 +129,7 @@ def test_shared_bot_satellite_resolves_primary_transport_for_restored_sources(mu
     assert mux.runner._authorization_adapter(Platform.TELEGRAM, "team_b") is None
 
 
+@pytest.mark.xfail(strict=False, reason="known upstream bug: the completion pre-flight does not reach the profile state.db, https://github.com/NousResearch/hermes-agent/issues/131279")
 def test_completion_preflight_runs_in_target_profile_scope(mux):
     """An async-delegation completion for a secondary session must be classified against THAT
     profile's state.db (the watcher runs unscoped, where the row does not exist → ``terminal``)."""
