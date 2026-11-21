@@ -67,6 +67,29 @@ class TriggerCurveTest(unittest.TestCase):
         self.assertEqual(small.threshold_tokens, int(131_072 * small.threshold_percent))
 
 
+class CurveAndSmallWindowFloorTest(unittest.TestCase):
+    def percent(self, window, threshold=CONFIGURED):
+        return ContextCompressor._effective_threshold_percent(window, threshold)
+
+    def curve(self, window, threshold=CONFIGURED):
+        return threshold + (0.85 - threshold) * (1_000_000 - window) / (1_000_000 - MINIMUM_CONTEXT_LENGTH)
+
+    def test_the_floor_applies_where_the_curve_is_below_75_percent(self):
+        self.assertEqual(self.percent(400_000), 0.75)
+        self.assertEqual(self.percent(300_000), 0.75)
+
+    def test_the_curve_applies_where_it_is_above_the_floor(self):
+        self.assertGreater(self.curve(256_000), 0.75)
+        self.assertAlmostEqual(self.percent(256_000), self.curve(256_000), places=6)
+        self.assertGreaterEqual(self.percent(400_000, 0.80), 0.80)
+        self.assertAlmostEqual(self.percent(400_000, 0.80), self.curve(400_000, 0.80), places=6)
+
+    def test_no_floor_at_or_above_the_limit(self):
+        self.assertLess(self.curve(512_000), 0.75)
+        self.assertAlmostEqual(self.percent(512_000), self.curve(512_000), places=6)
+        self.assertEqual(self.percent(1_000_000), CONFIGURED)
+
+
 class ServedModelTest(unittest.TestCase):
     def test_the_bifrost_headers_give_provider_and_model(self):
         self.assertEqual(served_model.served_model_from_headers(
