@@ -35,8 +35,9 @@ def test_aux_cost_survives_config_reload_failure(monkeypatch):
 
     assert len(calls) == 1
     assert calls[0][0] == "local-model"
+    # Fork patch 6447aec8b7: the aux pricing lookup stays offline (base_url=None).
     assert calls[0][2] == {
-        "provider": "custom", "base_url": "http://127.0.0.1:47970/v1", "api_key": None,
+        "provider": "custom", "base_url": None, "api_key": None,
     }
     assert len(rows) == 1
     assert rows[0]["estimated_cost_usd"] == 0.125
