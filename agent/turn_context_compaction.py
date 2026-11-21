@@ -118,9 +118,15 @@ def _reanchor(agent: Any, messages: list[Any], user_message: Any) -> int:
     api_content stamp, injection site and persist-override row hit the same dict."""
     from agent.turn_context import reanchor_current_turn_user_idx
 
-    idx = reanchor_current_turn_user_idx(messages, user_message)
+    idx = reanchor_current_turn_user_idx(messages, user_message, durable_turn_text(agent))
     agent._persist_user_message_idx = idx
     return idx
+
+
+def durable_turn_text(agent: Any) -> Any:
+    """The persist override as an anchor text: the content the current turn's row holds once it is flushed."""
+    override = getattr(agent, "_persist_user_message_override", None)
+    return override if isinstance(override, str) and override else None
 
 
 # ── Turn-start passes ──

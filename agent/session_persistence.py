@@ -177,6 +177,15 @@ def _db_flush_scan_start(agent, messages: list[dict]) -> int:
     return scan_start
 
 
+def _takes_turn_override(msg: dict, msg_idx: int, ov_idx: Any, pending_cli_message: Any) -> bool:
+    """Is ``msg`` the row the persist override belongs to? A stale index must never stamp this turn's ask
+    onto a ``pre_stop`` continuation nudge or a ``/steer`` row: they are later user rows of the same turn
+    with their own text (``"steer"`` is ``agent.prompt_builder.STEER_DISPLAY_KIND``)."""
+    if msg is pending_cli_message:
+        return True
+    return ov_idx == msg_idx and not msg.get("_pre_stop_synthetic") and msg.get("display_kind") != "steer"
+
+
 def _db_flush_row(agent, msg: dict, is_current_turn_user: bool) -> dict[str, Any]:
     """Build the session-db row for ``msg``, applying the persist override to THIS row only."""
     role = msg.get("role", "unknown")
@@ -323,7 +332,7 @@ def _db_flush_collect(agent, messages: list[dict], conversation_history: Optiona
             # minted (same-batch pairing happens inside the insert).
             if (tool_uid := tool_call_uid_from_history(messages, msg_idx, tool_uid_owners)) is not None:
                 msg[TOOL_CALL_UID] = tool_uid
-        row = _db_flush_row(agent, msg, ov_idx == msg_idx or msg is pending_cli_message)
+        row = _db_flush_row(agent, msg, _takes_turn_override(msg, msg_idx, ov_idx, pending_cli_message))
         if uid is not None and uid in store_uids:
             row[RESTORED_FROM_STORE] = True
         batch_rows.append(row)
