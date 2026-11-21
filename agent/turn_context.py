@@ -303,7 +303,7 @@ def start_deferred_title_upgrade(agent: Any) -> None:
     start_title_upgrade(upgrade)
 
 
-def reanchor_current_turn_user_idx(messages: list[Any], user_message: Any) -> int:
+def reanchor_current_turn_user_idx(messages: list[Any], user_message: Any, durable_text: Any = None) -> int:
     """Locate this turn's user message after compaction rebuilt ``messages``.
 
     Prefers the LAST user message whose content exactly matches this turn's text, else
@@ -318,6 +318,10 @@ def reanchor_current_turn_user_idx(messages: list[Any], user_message: Any) -> in
     survives (merge-summary-into-tail rewrites the content but the trackers still need a live anchor).
     Compaction handoffs must never become the fallback anchor (#80622) — they are reference-only
     scaffolding, not the active ask.
+
+    ``durable_text`` (the persist override) also counts as an exact match: after the first flush the live
+    row holds the durable text, not the wire text in ``user_message``, and without it the fallback can
+    land on a later ``pre_stop`` nudge or ``/steer`` row of the same turn.
     """
     from agent.context_compressor import user_originated_turn_view
 
@@ -328,7 +332,7 @@ def reanchor_current_turn_user_idx(messages: list[Any], user_message: Any) -> in
             continue
         # Typed synthetic current events keep their persistence anchor when raw
         # content is unchanged; not eligible for the human-only fallback below.
-        if msg.get("content") == user_message:
+        if msg.get("content") == user_message or (durable_text is not None and msg.get("content") == durable_text):
             return i
         live_view = user_originated_turn_view(msg)
         if live_view is None:
@@ -336,8 +340,9 @@ def reanchor_current_turn_user_idx(messages: list[Any], user_message: Any) -> in
         if live_view.get("content") == user_message:
             return i
         # Prefer a real human turn over a synthetic handoff / continuation marker
-        # when the exact content was rewritten by merge-into-tail.
-        if fallback < 0:
+        # when the exact content was rewritten by merge-into-tail. A ``pre_stop`` continuation
+        # nudge or a mid-turn ``/steer`` row comes after this turn's ask: never the turn anchor.
+        if fallback < 0 and not msg.get("_pre_stop_synthetic") and msg.get("display_kind") != "steer":
             fallback = i
     return fallback
 

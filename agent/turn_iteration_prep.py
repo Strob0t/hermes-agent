@@ -18,20 +18,20 @@ from typing import Any, Dict, List, Tuple
 
 from agent.display import KawaiiSpinner
 from agent.interrupt_control import interrupt_issuer, interrupted_during_api_call_reason
-from agent.turn_context_compaction import _reanchor
+from agent.turn_context_compaction import _reanchor, durable_turn_text
 from agent.turn_truncation import boosted_output_cap
 
 logger = logging.getLogger("agent.conversation_loop")
 
 
-def _anchors_current_turn(messages: Any, idx: Any, user_message: Any) -> bool:
+def _anchors_current_turn(messages: Any, idx: Any, user_message: Any, durable_text: Any = None) -> bool:
     """True when ``messages[idx]`` is this turn's user row (verbatim, or its user-originated view)."""
     if not isinstance(idx, int) or not 0 <= idx < len(messages):
         return False
     msg = messages[idx]
     if not (isinstance(msg, dict) and msg.get("role") == "user"):
         return False
-    if msg.get("content") == user_message:
+    if msg.get("content") == user_message or (durable_text is not None and msg.get("content") == durable_text):
         return True
     from agent.context_compressor import user_originated_turn_view
 
@@ -245,7 +245,8 @@ def prepare_iteration(
     # tool rows: prefix canonicalization then drops the assistant tool_call whose result fell past the
     # split, the orphaned result is sanitized away, and the model silently loses tool output that
     # state.db still holds. A valid index always lands on this turn's user row; re-anchor otherwise.
-    if user_message is not None and not _anchors_current_turn(messages, current_turn_user_idx, user_message):
+    if user_message is not None and not _anchors_current_turn(
+            messages, current_turn_user_idx, user_message, durable_turn_text(agent)):
         _reanchored_idx = _reanchor(agent, messages, user_message)
         request_logger.info(
             "Re-anchored stale current_turn_user_idx %s -> %s (session=%s)",
