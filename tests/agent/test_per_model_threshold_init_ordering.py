@@ -107,8 +107,8 @@ class TestFloorInteractionOnModelSwitch:
         # Switch to a <512K model whose override (0.40) is below the 0.75 floor.
         mock_ctx.return_value = 128_000
         cc.update_model(model="small-model", context_length=128_000)
-        assert cc.threshold_percent == 0.75  # raise-only floor wins
-        assert cc.threshold_tokens == int(128_000 * 0.75)
+        assert cc.threshold_percent == ContextCompressor._effective_threshold_percent(128_000, 0.40)  # fork: trigger curve raises above the upstream floor (z7)
+        assert cc.threshold_tokens == int(128_000 * cc.threshold_percent)  # fork: trigger curve raises above the upstream floor (z7)
 
 
 

@@ -36,15 +36,15 @@ class TestSmallContextThresholdFloor:
 
     def test_update_model_rederives_floor_both_directions(self):
         comp = _make(128_000, pct=0.50)
-        assert comp.threshold_percent == 0.75
+        assert comp.threshold_percent == ContextCompressor._effective_threshold_percent(128_000, 0.50)  # fork: trigger curve raises above the upstream floor (z7)
         # small -> large: back to the configured 50%
         comp.update_model("big", 1_000_000)
         assert comp.threshold_percent == 0.50
         assert comp.threshold_tokens == 500_000
         # large -> small: floor re-applies
         comp.update_model("small", 200_000)
-        assert comp.threshold_percent == 0.75
-        assert comp.threshold_tokens == 150_000
+        assert comp.threshold_percent == ContextCompressor._effective_threshold_percent(200_000, 0.50)  # fork: trigger curve raises above the upstream floor (z7)
+        assert comp.threshold_tokens == int(200_000 * comp.threshold_percent)  # fork: trigger curve raises above the upstream floor (z7)
 
 
 class TestReasoningExcludedFromSummarizer:

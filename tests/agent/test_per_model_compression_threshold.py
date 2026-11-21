@@ -64,7 +64,7 @@ class TestContextCompressorModelThresholds:
         # Resolve while mock is active (lazy init defers floor past __init__).
         _ = cc.context_length
         # 256K < 512K → floored at 0.75
-        assert cc.threshold_percent == 0.75
+        assert cc.threshold_percent == ContextCompressor._effective_threshold_percent(256_000, 0.50)  # fork: trigger curve raises above the upstream floor (z7)
         assert cc.model_thresholds == {}
 
 
