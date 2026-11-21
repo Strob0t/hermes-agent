@@ -53,7 +53,7 @@ def test_bedrock_resolution_migrates_ambiguous_cache_and_preserves_probe(
     compressor = ContextCompressor(model, provider="bedrock", base_url=base_url, quiet_mode=True)
     assert compressor.context_length == expected
     # Preserve the existing raise-only 75% floor for windows below 512K.
-    expected_threshold = int(expected * (0.75 if expected < 512_000 else 0.5))
+    expected_threshold = int(expected * ContextCompressor._effective_threshold_percent(expected, 0.5))  # fork: trigger curve raises above the upstream floor (z7)
     assert compressor.threshold_tokens == expected_threshold
     assert mm.get_model_context_length(model, provider="bedrock", base_url=base_url) == expected
     probe.assert_called_once_with(model, "us-east-1")
