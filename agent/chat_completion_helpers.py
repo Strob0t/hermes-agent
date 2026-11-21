@@ -2133,6 +2133,28 @@ def _iteration_summary_api_messages(agent, messages: list) -> list:
     return api_messages
 
 
+def _summary_request_middleware(agent, request, api_request_id: str, api_call_count: int = 0):
+    """Run the iteration-summary request through the same ``llm_request`` middleware as a normal
+    turn call (agent/turn_api_request.py). Without it a session model that a middleware resolves
+    (for example a router alias) goes to the provider unchanged and the summary fails."""
+    if not isinstance(request, dict):
+        return request
+    try:
+        from hermes_cli.middleware import apply_llm_request_middleware
+
+        return apply_llm_request_middleware(
+            request, task_id=getattr(agent, "_current_task_id", "") or "",
+            turn_id=getattr(agent, "_current_turn_id", "") or "", api_request_id=api_request_id,
+            session_id=agent.session_id or "", platform=agent.platform or "", model=agent.model,
+            provider=agent.provider, base_url=agent.base_url, api_mode=agent.api_mode,
+            api_call_count=api_call_count, call_role="iteration_summary",
+        ).payload
+    except Exception:
+        logger.warning("LLM request middleware failed for the iteration summary; sending it unmodified",
+                       exc_info=True)
+        return request
+
+
 def _managed_summary_call(agent, api_request_id: str, request, callback, *, retry_count: int):
     from agent import relay_llm
     return relay_llm.execute_current(
@@ -2157,7 +2179,7 @@ def _summary_text(agent, response, **normalize_kwargs) -> str:
     return (normalized.content or "").strip()
 
 
-def _codex_summary_attempt(agent, api_messages: list, api_request_id: str):
+def _codex_summary_attempt(agent, api_messages: list, api_request_id: str, api_call_count: int = 0):
     def _attempt(retry_count: int) -> str:
         codex_kwargs = agent._build_api_kwargs(api_messages)
         # The transport emits these three as one block (transports/codex.py build_kwargs);
@@ -2165,6 +2187,7 @@ def _codex_summary_attempt(agent, api_messages: list, api_request_id: str):
         codex_kwargs.pop("tools", None)
         codex_kwargs.pop("tool_choice", None)
         codex_kwargs.pop("parallel_tool_calls", None)
+        codex_kwargs = _summary_request_middleware(agent, codex_kwargs, api_request_id, api_call_count)
         # Route through the same seam as normal Codex turns: a direct _run_codex_stream
         # bypasses the stale/TTFB watchdogs, interrupt handling and client cleanup, so an
         # unattended cron summary could wedge forever (#70943).
@@ -2172,20 +2195,21 @@ def _codex_summary_attempt(agent, api_messages: list, api_request_id: str):
     return _attempt
 
 
-def _anthropic_summary_attempt(agent, api_messages: list, api_request_id: str):
+def _anthropic_summary_attempt(agent, api_messages: list, api_request_id: str, api_call_count: int = 0):
     def _attempt(retry_count: int) -> str:
         ant_kw = agent._get_transport().build_kwargs(
             model=agent.model, messages=api_messages, tools=None, max_tokens=agent.max_tokens,
             reasoning_config=agent.reasoning_config, is_oauth=agent._is_anthropic_oauth,
             preserve_dots=agent._anthropic_preserve_dots(), base_url=getattr(agent, "_anthropic_base_url", None))
         ant_kw = _merge_nous_portal_messages_extra_body(agent, ant_kw, api_messages)
+        ant_kw = _summary_request_middleware(agent, ant_kw, api_request_id, api_call_count)
         response = _managed_summary_call(
             agent, api_request_id, ant_kw, agent._interruptible_api_call, retry_count=retry_count)
         return _summary_text(agent, response, strip_tool_prefix=agent._is_anthropic_oauth)
     return _attempt
 
 
-def _chat_summary_attempt(agent, api_messages: list, api_request_id: str):
+def _chat_summary_attempt(agent, api_messages: list, api_request_id: str, api_call_count: int = 0):
     # Same kwargs builder as the main loop so the summary keeps the cached prefix (tools,
     # prompt_cache_key, xAI alias, Moonshot sanitization). Do not omit tools or force
     # tool_choice="none" here: SGLang renders the prompt with tools=None in that mode and the KV
@@ -2194,6 +2218,7 @@ def _chat_summary_attempt(agent, api_messages: list, api_request_id: str):
     # The summary now carries ``tools``; on cache-planned routes the main loop scrubbed a deep
     # copy, so ``agent.tools`` may still hold bytes the provider 400s on.
     sanitize_outbound_kwargs(agent, summary_kwargs)
+    summary_kwargs = _summary_request_middleware(agent, summary_kwargs, api_request_id, api_call_count)
     from agent.conversation_loop import _moa_client_consumes_prepared_request
     if agent.provider == "moa" and _moa_client_consumes_prepared_request(agent.client):  # transport strips data_use
         summary_kwargs["_moa_prepared_request"] = agent.client.chat.completions.prepare(api_messages)
@@ -2232,7 +2257,7 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     try:
         api_messages = _iteration_summary_api_messages(agent, messages)
         build_attempt = _SUMMARY_ATTEMPT_BUILDERS.get(agent.api_mode, _chat_summary_attempt)
-        attempt = build_attempt(agent, api_messages, summary_api_request_id)
+        attempt = build_attempt(agent, api_messages, summary_api_request_id, api_call_count=api_call_count)
 
         # One retry on an empty summary; a summary empty once its <think> block is stripped is NOT retried.
         final_response = _EMPTY_SUMMARY_RESPONSE
