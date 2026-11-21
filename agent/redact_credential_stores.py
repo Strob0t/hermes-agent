@@ -12,17 +12,17 @@ _SECRET_CFG_NAMES = r"(?:api[ _.\-]?key|token|secret|passwd|password|credential|
 # Rendered line-number prefix: ``5|line`` (read_file), ``6:line`` (grep -n), ``7-line`` (grep -A/-B/-C
 # context lines) and ``     8\tline`` (cat -n / nl: right-aligned number + TAB). Callers put the ONLY
 # leading ``[ \t]*`` in front of it — stacking a second whitespace run around an optional gutter made
-# the anchored passes quadratic on long indented lines (2s per 5k spaces).
-_LINE_NUMBER_GUTTER = r"(?:[0-9]+(?:[|:\-]|\t)[ \t]*)?"
+# the anchored passes quadratic on long indented lines; possessive: the gutter and leading runs never backtrack.
+_LINE_NUMBER_GUTTER = r"(?:[0-9]+(?:[|:\-]|\t)[ \t]*+)?"
 
 # AWS ``credential_process`` (``~/.aws/config`` / ``~/.aws/credentials``) holds the helper command that
 # fetches the credential, not the secret. Only the key of such a line below an INI ``[section]`` header is
 # exempt, so a ``.env`` / shell rc / config.yaml key of that name keeps the assignment gate. The command
 # itself still goes through every pass: vendor prefixes, ``--flag`` secrets, ``sh -c 'SECRET=x'``.
 # A section name never starts with whitespace, while a shell test ``[ -f x ]`` always does.
-_INI_SECTION_RE = re.compile(rf"^[ \t]*{_LINE_NUMBER_GUTTER}\[[^\[\]\s][^\[\]\r\n]*\][ \t]*+$", re.MULTILINE)
+_INI_SECTION_RE = re.compile(rf"^[ \t]*+{_LINE_NUMBER_GUTTER}\[[^\[\]\s][^\[\]\r\n]*\][ \t]*+$", re.MULTILINE)
 _AWS_CREDENTIAL_PROCESS_KEY_RE = re.compile(
-    rf"^[ \t]*{_LINE_NUMBER_GUTTER}credential_process[ \t]*+=[ \t]*+", re.MULTILINE)
+    rf"^[ \t]*+{_LINE_NUMBER_GUTTER}credential_process[ \t]*+=[ \t]*+", re.MULTILINE)
 
 
 def aws_credential_process_keys(text: str) -> list[tuple[int, int]]:
@@ -53,13 +53,13 @@ def outside_spans(text: str, spans: list[tuple[int, int]], fn) -> str:
 # field and a ``# password ...`` comment does not start with a netrc keyword.
 # A netrc line is ``keyword value`` pairs, several ``machine`` entries may share one line.
 _NETRC_LINE_RE = re.compile(
-    rf"^([ \t]*{_LINE_NUMBER_GUTTER})((?:machine|default|login|account|port|password)\b[^\r\n]*)", re.MULTILINE,
+    rf"^([ \t]*+{_LINE_NUMBER_GUTTER})((?:machine|default|login|account|port|password)\b[^\r\n]*)", re.MULTILINE,
 )
 _NETRC_KEYWORDS = ("machine", "login", "password", "account", "port")
 _NETRC_TOKEN_RE = re.compile(r'"[^"\r\n]*"?|\S+')
 _CREDENTIAL_STORE_RES = (
     # Host and port never hold ``=``/``#``; a database or user name may (``app:build#bot``).
-    re.compile(rf"(^[ \t]*{_LINE_NUMBER_GUTTER}(?:[^:\s=#]*:){{2}}(?:[^:\s]*:){{2}})(\S[^\r\n]*)", re.MULTILINE),
+    re.compile(rf"(^[ \t]*+{_LINE_NUMBER_GUTTER}(?:[^:\s=#]*:){{2}}(?:[^:\s]*:){{2}})(\S[^\r\n]*)", re.MULTILINE),
     # npm expands ``${NAME}`` / ``${NAME?}`` here: a value that is only that reference names a variable,
     # not the secret. Any other value runs to end of line (npm keeps internal spaces): ``${X} lit``.
     re.compile(r'(:_(?:authToken|auth|password)[ \t]*=[ \t]*)(?!"?\$\{\w+\??\}"?[ \t\r]*$)(\S(?:[^\r\n]*\S)?)', re.MULTILINE),
@@ -71,7 +71,7 @@ _CREDENTIAL_STORE_RES = (
 # (_CFG_SECRET_WORD_RE): ``run{NAMES}run`` backtracked O(n^2) on a long keyword line with no ``=``.
 # ``(?<=api) (?=key)`` keeps the one key spelling with a space, ``api key = X``, in the key run.
 _INI_ASSIGN = (
-    rf"(^[ \t]*{_LINE_NUMBER_GUTTER}([A-Za-z0-9_.\-]*+(?:(?<=api) (?=key)[A-Za-z0-9_.\-]*+)?+)"
+    rf"(^[ \t]*+{_LINE_NUMBER_GUTTER}([A-Za-z0-9_.\-]*+(?:(?<=api) (?=key)[A-Za-z0-9_.\-]*+)?+)"
     r"(?:[ \t]++D[ \t]*+|D[ \t]++|D(?=\S+[ \t]+[^\s#])))(\S(?:[^\r\n]*\S)?)"
 )
 _INI_SPACED_ASSIGN_RE = re.compile(_INI_ASSIGN.replace("D", "="), re.IGNORECASE | re.MULTILINE)
