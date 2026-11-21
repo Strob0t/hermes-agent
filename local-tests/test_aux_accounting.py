@@ -39,7 +39,7 @@ class AuxBaseUrlTest(unittest.TestCase):
     def _run(self, base_url):
         captured = {}
 
-        def fake_estimate(model, usage, *, provider=None, base_url=None):
+        def fake_estimate(model, usage, *, provider=None, base_url=None, api_key=None):
             captured["base_url"] = base_url
             captured["provider"] = provider
             return _Cost()

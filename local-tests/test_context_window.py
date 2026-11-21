@@ -202,6 +202,7 @@ class SessionWindowTest(unittest.TestCase):
         from agent import turn_context_compaction as compaction
         respond(session_agent(), self.SMALL)
         fresh = session_agent()
+        fresh.compression_enabled = False  # the turn-start cold prune is not under test
         seen = []
         with patch.object(compaction, "_idle_compaction",
                           side_effect=lambda agent, *a: seen.append(agent.context_compressor.context_length)), \

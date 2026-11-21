@@ -8,7 +8,8 @@ import unittest
 
 from gateway.platforms.api_server import _openai_error
 from gateway.platforms.api_server_runs import _run_user_message
-from gateway.session_api_media import _data_url_bytes, _image_urls
+from gateway.session_api_media import _image_urls
+from session_rules.api_payloads import data_url_bytes
 
 # 1x1 PNG
 PNG = ("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk"
@@ -59,7 +60,7 @@ class ImageTest(unittest.TestCase):
     def test_admission_media_reads_the_image(self):
         parts = [{"type": "input_text", "text": "describe"}, {"type": "input_image", "image_url": PNG}]
         message, _ = _run_user_message(run_input(parts), _openai_error)
-        decoded = [_data_url_bytes(url) for url in _image_urls(message)]
+        decoded = [data_url_bytes(url) for url in _image_urls(message)]
         self.assertEqual(len(decoded), 1)
         self.assertEqual(decoded[0][0], "image/png")
         self.assertTrue(decoded[0][1].startswith(b"\x89PNG"))
