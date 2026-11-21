@@ -129,7 +129,7 @@ class AdmissionWakeTurnTest(unittest.TestCase):
         sat.check_api_turn(authority, ref, self.payload(wake_turn=True))
         sat.check_api_turn(authority, ref, self.payload())
         for bad in (False, "yes", 1):
-            with self.assertRaises(sat.RuntimeStoreError):
+            with self.assertRaises(sat.AuthorityRefusal):
                 sat.check_api_turn(authority, ref, self.payload(wake_turn=bad))
 
 
