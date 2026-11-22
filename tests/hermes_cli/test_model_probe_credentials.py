@@ -148,7 +148,8 @@ def _record_aux_pricing_key(monkeypatch):
 def test_aux_pricing_lookup_leaves_a_declared_credential_source_its_endpoint(keyed, monkeypatch, live_main, source):
     """While a credential source owns the live main endpoint, the model block's saved key is not sent."""
     live_main(source)
-    assert _record_aux_pricing_key(monkeypatch) == {"provider": "custom", "base_url": BASE, "api_key": None}
+    # fork: patch 6447aec8b7 sends base_url=None to the usage cost estimate (z7)
+    assert _record_aux_pricing_key(monkeypatch) == {"provider": "custom", "base_url": None, "api_key": None}
 
 
 def test_aux_pricing_lookup_sends_the_configured_key_beside_a_static_live_key(keyed, monkeypatch, live_main):
