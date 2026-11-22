@@ -248,7 +248,10 @@ def test_removing_compressor_keys_restores_fresh_build_values(monkeypatch):
         "model_thresholds",
         "threshold_percent",  # the stale per-model override must stop steering the live threshold
     ):
-        assert getattr(compressor, attr) == getattr(fresh, attr), attr
+        expected = getattr(fresh, attr)
+        if attr == "threshold_percent":
+            expected = ContextCompressor._effective_threshold_percent(600_000, expected)  # fork: patch b8e3b319c8 trigger curve (owner decision 1B, z7)
+        assert getattr(compressor, attr) == expected, attr
 
 
 def test_boolean_prune_trigger_matches_fresh_build(monkeypatch):
@@ -312,9 +315,9 @@ def test_removing_threshold_restores_derived_default(monkeypatch):
         {"model": {"context_length": 600_000}, "compression": {}},
     )
     assert compressor._config_threshold_percent == 0.50
-    assert compressor.threshold_percent == 0.50
+    assert compressor.threshold_percent == ContextCompressor._effective_threshold_percent(600_000, 0.50)  # fork: patch b8e3b319c8 trigger curve (owner decision 1B, z7)
     # The absent cap key restores DEFAULT_CONFIG's cap on top of the derived ratio trigger.
-    assert compressor.threshold_tokens == _with_default_cap(int(600_000 * 0.50))
+    assert compressor.threshold_tokens == _with_default_cap(int(600_000 * ContextCompressor._effective_threshold_percent(600_000, 0.50)))  # fork: patch b8e3b319c8 trigger curve (owner decision 1B, z7)
 
 
 def test_removing_context_length_reinfers_from_model_metadata(monkeypatch):
