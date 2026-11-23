@@ -134,9 +134,15 @@ jobs:
         with:
           python-version: "3.14"
 
+      - name: Install uv
+        if: steps.rebase.outputs.result == 'clean'
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          version: "0.12.13"
+
       - name: Install the project and aiohttp
         if: steps.rebase.outputs.result == 'clean'
-        run: pip install -e . "aiohttp==3.14.5"
+        run: uv pip install --system -e . "aiohttp==3.14.5"
 
       - name: Run local-tests on the rebased tree
         id: tests
