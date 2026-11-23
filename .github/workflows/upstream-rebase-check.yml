@@ -22,7 +22,7 @@ on:
       base_tag:
         description: "Base tag the patch series sits on (series = base_tag..this branch)"
         required: false
-        default: "v0.23.2"
+        default: "v0.23.3"
       target_ref:
         description: "Upstream ref to rebase onto; empty = NousResearch latest release tag"
         required: false
@@ -44,7 +44,7 @@ jobs:
       PATCH_BRANCH: goal-loop-patches
       # gh prefers a remote named 'upstream' when it picks the repo; pin it to this fork
       GH_REPO: ${{ github.repository }}
-      BASE_TAG: ${{ github.event.inputs.base_tag || 'v0.23.2' }}
+      BASE_TAG: ${{ github.event.inputs.base_tag || 'v0.23.3' }}
       UPSTREAM: https://github.com/NousResearch/hermes-agent.git
     steps:
       - name: Checkout the patch branch (full history)
@@ -134,9 +134,9 @@ jobs:
         with:
           python-version: "3.14"
 
-      - name: Install aiohttp
+      - name: Install the project and aiohttp
         if: steps.rebase.outputs.result == 'clean'
-        run: pip install "aiohttp==3.14.5"
+        run: pip install -e . "aiohttp==3.14.5"
 
       - name: Run local-tests on the rebased tree
         id: tests
