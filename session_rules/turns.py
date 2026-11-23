@@ -464,9 +464,17 @@ def _is_actionable_user_turn(message: Any) -> bool:
     # and must not anchor the tail or seed auto-focus. Mirrors is_user_originated_turn.
     # A /steer row is typed for the renderer and the alternation repair, but it IS human input.
     display_kind = message.get("display_kind")
-    if (display_kind and display_kind != STEER_DISPLAY_KIND) or _is_context_summary_message(message):
+    if (display_kind and display_kind != STEER_DISPLAY_KIND and not _is_api_inbound_user_turn(message)) \
+            or _is_context_summary_message(message):
         return False
     return not _is_blank_user_turn(message)
+
+
+def _is_api_inbound_user_turn(message: Any) -> bool:
+    """local patch: an API client turn is stored as internal_notification, but it is human input."""
+    metadata = message.get("display_metadata") if isinstance(message, dict) else None
+    return (message.get("display_kind") == "internal_notification" and isinstance(metadata, dict)
+            and metadata.get("api_inbound") is True)
 
 
 def _strip_context_summary_handoff_message(message: dict[str, Any]) -> Optional[dict[str, Any]]:
