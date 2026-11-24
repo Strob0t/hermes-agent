@@ -1014,6 +1014,24 @@ tool_output:
   max_lines: 500
 ```
 
+### JSON Tool-Result Compaction
+
+Valid JSON tool results can be compacted before they enter the context. Only insignificant whitespace outside string literals is removed; the content is otherwise unchanged.
+
+```yaml
+tool_output:
+  json_compaction:
+    mode: compact                  # off | observe | compact
+    min_chars: 1024                # skip results shorter than this (minimum 1024)
+    min_savings_ratio: 0.1         # keep the original unless compaction saves at least this fraction (0..1)
+    exclude_tools: [read_file]     # tool names (glob patterns) whose results are never compacted
+```
+
+- **`mode`** — `off` disables compaction, `observe` only logs the character savings and keeps the original result, and `compact` replaces the result with the compacted text. Default `compact`. The policy is read once per process.
+- **`min_chars`** — Results shorter than this many characters are not compacted. Must be an integer of at least `1024`. Default `1024`.
+- **`min_savings_ratio`** — A result is compacted only if the compacted text is at least this fraction shorter than the original. Must be greater than `0` and less than `1`. Default `0.1`.
+- **`exclude_tools`** — Results from matching tools are never compacted. Entries are fnmatch-style patterns on the tool name. Default `[read_file]`, because file reads can be used to inspect exact formatting.
+
 ### Tool-Result Spillover Budget
 
 Separately from truncation, oversized tool *results* are spilled to disk rather than cut: the full output is saved under `$HERMES_HOME/cache/spillover/` and the in-context content is replaced by a preview plus the saved file's path (readable with `read_file` using `offset`/`limit`, or processable with `execute_code`). The generic per-result spillover threshold is 100,000 chars, scaled down automatically for small-context models. A spill file is kept as long as any session's transcript still points at it, and leaves with its session when that session is deleted or pruned; the gateway's hourly housekeeping and the first spill of each process only sweep unreferenced files older than the session retention window (`sessions.retention_days`, default 90 days, never less than 24 hours), so a session resumed later still finds what its transcript points at. The originals of tool results the proactive prune shortened (`$HERMES_HOME/cache/pruned/`, see below) are kept and swept the same way.
