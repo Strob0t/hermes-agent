@@ -304,7 +304,26 @@ def _request_agent_overrides(
     model_options = body.get("model_options")
     if isinstance(model_options, dict):
         overrides["model_options"] = dict(model_options)
+    toolsets = _request_toolset_override(body)
+    if toolsets is not None:
+        overrides["enabled_toolsets_override"] = toolsets
     return overrides
+
+
+def _request_toolset_override(body: Any) -> Optional[list[str]]:
+    """Per-request ``enabled_toolsets`` narrowing; None (no override) when absent, malformed or empty."""
+    raw = body.get("enabled_toolsets") if isinstance(body, dict) else None
+    if not isinstance(raw, list):
+        return None
+    return [t.strip() for t in raw if isinstance(t, str) and t.strip()] or None
+
+
+def _narrow_toolsets(granted: list[str], requested: list[str], config: dict) -> list[str]:
+    """Intersect the granted toolsets with a request. The request names resolve like a saved
+    ``platform_toolsets`` list (composites expand), so a request can only remove toolsets."""
+    from hermes_cli.tools_config import _get_platform_tools
+    resolved = _get_platform_tools({**config, "platform_toolsets": {"api_server": list(requested)}}, "api_server")
+    return sorted(set(granted) & (set(resolved) | set(requested)))
 
 
 def _request_relay_metadata(body: Any) -> dict[str, Any]:
@@ -2187,7 +2206,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         model_options: Optional[dict[str, Any]] = None, route: Optional[dict[str, Any]] = None,
         session_model: Optional[str] = None, confirmed_runtime_lock: bool = False,
         room_dispatch: Optional[dict[str, Any]] = None,
-        room_execution_policy: Optional[dict[str, Any]] = None) -> Any:
+        room_execution_policy: Optional[dict[str, Any]] = None,
+        enabled_toolsets_override: Optional[list[str]] = None) -> Any:
         """Create an AIAgent from the gateway runtime config + platform toolsets.
         ``gateway_session_key`` persists across transcripts (memory scope), unlike ``session_id``;
         ``route`` / ``session_model`` are mutually exclusive; ``confirmed_runtime_lock`` beats the
@@ -2225,6 +2245,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             policy = RoomExecutionPolicy.from_mapping(room_execution_policy or {})
             enabled_toolsets = list(policy.enabled_toolsets)
             max_iterations = policy.max_iterations
+        if enabled_toolsets_override is not None:
+            enabled_toolsets = _narrow_toolsets(enabled_toolsets, enabled_toolsets_override, user_config)
         # Reasoning resolves against the model that actually runs (per-model overrides), so only
         # after the precedence chain settles; an explicit request wins.
         if request_reasoning_config is None:
@@ -2363,6 +2385,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "runs_idempotency": _api_runs._idempotency_capabilities(self, store_type=RunIdempotencyStore),
             **_STATIC_FEATURE_FLAGS,
             "run_unknown_resolution": getattr(runner, "session_authority", None) is not None,
+            # Session-authority admissions persist only their known settings, so narrowing is
+            # honored (and advertised) only on the direct path.
+            "enabled_toolsets_override": getattr(runner, "session_authority", None) is None,
             "cors": bool(self._cors_origins)}
         return web.json_response({
             "object": "hermes.api_server.capabilities", "platform": "hermes-agent",
@@ -2839,6 +2864,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     agent_overrides[dst_key] = requested[src_key]
             if runtime_request.get("model_options"):
                 agent_overrides["model_options"] = runtime_request["model_options"]
+            # A model lock pins the runtime, not the toolset grant: narrowing still applies.
+            locked_toolsets = _request_toolset_override(body)
+            if locked_toolsets is not None:
+                agent_overrides["enabled_toolsets_override"] = locked_toolsets
         else:
             stored_model = self._stored_session_model(session)
             stored_route = self._resolve_route(stored_model)
@@ -3637,7 +3666,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         relay_metadata: Optional[dict[str, Any]] = None, notification_category: str = "result",
         resume_unanswered_turn: bool = False, approval_notify_callback=None,
         approval_session_key: Optional[str] = None, walked_from: Optional[str] = None,
-        wake_turn: bool = False) -> tuple:
+        wake_turn: bool = False, enabled_toolsets_override: Optional[list[str]] = None) -> tuple:
         """Create an agent and run one turn in a thread executor -> ``(result, usage)``.
         ``approval_notify_callback`` (with ``approval_session_key``) routes dangerous-command
         approval requests to the caller's stream, keyed like ``/v1/runs`` approvals (#51871).
@@ -3693,7 +3722,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                         reasoning_callback=reasoning_callback, status_callback=status_callback,
                         gateway_session_key=gateway_session_key, requested_model=requested_model,
                         requested_provider=requested_provider, model_options=model_options, route=route,
-                        session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock)
+                        session_model=session_model, confirmed_runtime_lock=confirmed_runtime_lock,
+                        **({} if enabled_toolsets_override is None
+                           else {"enabled_toolsets_override": enabled_toolsets_override}))
                     if agent_ref is not None:
                         agent_ref[0] = agent
                     if resume_unanswered_turn:
