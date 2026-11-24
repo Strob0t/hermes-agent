@@ -126,6 +126,10 @@ DEFAULT_CONFIG = {
         # visible "retrying automatically" countdown instead of ending the turn. Esc/interrupt stops
         # the wait; auth/format/billing/policy errors never enter. 0 disables.
         "auto_recovery_cycles": 5,
+        # Opt-in (0 = off). When the fallback chain is spent and the armed rate-limit cooldown is at
+        # most this many seconds, wait it out once (interruptible) and retry once; a second rate
+        # limit in the same turn ends the turn as before. Clamped to 60 (the wait holds the turn lease).
+        "rate_limit_tail_wait_seconds": 0,
         # Seconds the Codex/Responses stream may keep reading after its terminal frame so the relay
         # finalizer can run. Relays that never close the SSE socket after response.completed would
         # otherwise wedge the turn until the idle watchdog discards the already-billed response
