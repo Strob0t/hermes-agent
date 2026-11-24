@@ -120,6 +120,14 @@ DEFAULT_CONFIG = {
         # Hermes-level retries for API errors (connection drops, timeouts, 5xx) around the whole call; the
         # SDK also retries (max_retries=2). Set 1 for fast failover to fallbacks; raise for longer hiccups.
         "api_max_retries": 3,
+        # Jittered exponential backoff (seconds, clamped >= 0). retry_*: invalid/empty responses;
+        # rate_limit_retry_*: retryable API errors without Retry-After. A null max keeps each
+        # site's built-in cap (invalid 120, empty 60, rate limit 60, Retry-After 600); a set
+        # rate_limit_retry_max_delay also caps a provider Retry-After.
+        "retry_base_delay": 5.0,
+        "retry_max_delay": None,
+        "rate_limit_retry_base_delay": 2.0,
+        "rate_limit_retry_max_delay": None,
         "codex_request_compression": True,  # zstd to official Codex; a bare-400 frame resends as JSON
         # Once api_max_retries AND the fallback chain are spent on a transient outage (5xx,
         # overloaded/529, connect/read timeouts) with nothing delivered yet, wait and retry this many

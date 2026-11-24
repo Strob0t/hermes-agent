@@ -19,7 +19,7 @@ from agent import empty_response_guard as _empty_guard
 from agent.message_metadata import append_message
 from agent.message_sanitization import _sanitize_surrogates
 from agent.turn_context_compaction import _refund_api_call
-from agent.turn_recovery import interruptible_backoff_sleep
+from agent.turn_recovery import interruptible_backoff_sleep, retry_delay_setting
 
 logger = logging.getLogger("agent.conversation_loop")
 
@@ -125,7 +125,10 @@ def _retry_empty(
         return None, None, deterministic
     agent._empty_content_retries += 1
     n = agent._empty_content_retries
-    wait_time = jittered_backoff(n, base_delay=5.0, max_delay=60.0)
+    wait_time = jittered_backoff(
+        n, base_delay=retry_delay_setting(agent, "_retry_base_delay", 5.0),
+        max_delay=retry_delay_setting(agent, "_empty_retry_max_delay", 60.0),
+    )
     logger.warning(
         "Empty response (%s) — retry %d/%d in %.1fs (model=%s)",
         "reasoning but no visible content" if observed_generation else "no content or reasoning",

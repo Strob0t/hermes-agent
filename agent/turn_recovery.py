@@ -1470,6 +1470,15 @@ _ZAI_POLICY_NOTES = {
 }
 
 
+def retry_delay_setting(agent: Any, name: str, default: float) -> float:
+    """``agent.<name>`` (set by ``agent_init._apply_retry_delays``) when it is a real number,
+    else ``default``: agents built without init (tests, stand-ins) keep the built-in delay."""
+    value = getattr(agent, name, None)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return default
+
+
 def reset_hint(api_error: Exception) -> str:
     """``"~13m"`` until the ``reset_at`` parsed from *api_error* (epoch s/ms or ISO-8601), else ``""``.
 
@@ -1490,7 +1499,7 @@ def compute_error_backoff(
     is_zai_coding_overload: bool, base_url: Any, model: Any,
 ) -> float:
     """Pick the wait before the next API retry and announce it. Retry-After wins for
-    rate limits and any other retryable error (capped at ``RETRY_AFTER_CAP_S``); otherwise
+    rate limits and any other retryable error (capped at ``agent._retry_after_cap``); otherwise
     jittered backoff, replaced by the adaptive policy for 429s / Z.AI overloads. Retries are
     buffered (replayed only if every retry fails); a long Z.AI Coding wait or a non-rate-limit
     ``Retry-After`` over ``LIVE_RETRY_WAIT_CAP_S`` is announced when it starts."""
@@ -1508,8 +1517,11 @@ def compute_error_backoff(
     # outage into a retry storm.
     _retry_after = provider_retry_after_seconds(api_error)
     if _retry_after is not None:
-        _retry_after = min(_retry_after, RETRY_AFTER_CAP_S)
-    wait_time = _retry_after if _retry_after is not None else jittered_backoff(retry_count, base_delay=2.0, max_delay=60.0)
+        _retry_after = min(_retry_after, retry_delay_setting(agent, "_retry_after_cap", RETRY_AFTER_CAP_S))
+    wait_time = _retry_after if _retry_after is not None else jittered_backoff(
+        retry_count, base_delay=retry_delay_setting(agent, "_rate_limit_retry_base_delay", 2.0),
+        max_delay=retry_delay_setting(agent, "_rate_limit_retry_max_delay", 60.0),
+    )
     _backoff_policy = None
     _adaptive = is_rate_limited or is_zai_coding_overload
     if _adaptive and _retry_after is None:
