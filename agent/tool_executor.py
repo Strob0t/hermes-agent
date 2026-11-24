@@ -32,6 +32,7 @@ from agent.display import (
 )
 from agent.compression_marker import _COMPRESSION_MARKER_PREFIX
 from agent.interrupt_control import _REASON_USER_INTERRUPT, interrupt_skip_wording
+from agent.tool_rejection import CANCELLED_STATUS, outcome_result
 from session_rules.turns import coalesce_tool_call_id
 from agent.onboarding import observe_tool_result as observe_onboarding_result
 from agent import plugin_live_notes
@@ -341,7 +342,8 @@ def _append_skipped_tool_results(
     append and returns False on the first failed flush when ``stop_on_flush_failure``."""
     for tc in tool_calls:
         name = _tc_name(tc)
-        result = content.replace("{name}", name)
+        # Not a tool output: the ``cancelled`` status lets the compressor summarize the call as not run.
+        result = outcome_result(CANCELLED_STATUS, content.replace("{name}", name))
         messages.append(make_tool_result_message(name, result, _pairing_tool_call_id(tc), effect_disposition="none"))
         if hook_error_type is not None:
             _ToolCallRef(name, {}, effective_task_id, (hook_id or _pairing_tool_call_id)(tc), []).emit_post(
@@ -874,7 +876,11 @@ _SEQUENTIAL_DEADLINE_EXEMPT_TOOLS = frozenset({"delegate_task", "manage_connecti
 
 def _abandoned_sequential_result(agent, ref: _ToolCallRef, message: str, result_cls, **outcome) -> _ManagedToolResult:
     """Emit the terminal post_tool_call for a worker the sequential runner gave up on
-    (timeout / interrupt) and wrap ``message`` in its marker ``result_cls``."""
+    (timeout / interrupt) and wrap ``message`` in its marker ``result_cls``. An abandoned call
+    carries the ``cancelled`` status; a timeout keeps its plain ``Error executing tool`` text,
+    which the ACP adapter detects as a failure."""
+    if result_cls is _ToolCancelledResult:
+        message = outcome_result(CANCELLED_STATUS, message)
     ref.emit_post(agent, message, **outcome)
     return _ManagedToolResult(result=result_cls(message), args=ref.args, middleware_trace=ref.trace, blocked=False, dispatched=True)
 
@@ -1544,7 +1550,7 @@ def _unfinished_tool_result(agent, ref: _ToolCallRef, *, timed_out: bool, timeou
         tool_duration, effect_disposition = float(timeout_s or 0.0), "unknown"
     elif agent._interrupt_requested:
         why = interrupt_skip_wording(agent)
-        function_result = f"[Tool execution cancelled — {ref.name} was skipped. {why}]"
+        function_result = outcome_result(CANCELLED_STATUS, f"[Tool execution cancelled — {ref.name} was skipped. {why}]")
         outcome = dict(status="cancelled", error_type="keyboard_interrupt", error_message=f"Tool execution cancelled. {why}")
         tool_duration, effect_disposition = 0.0, None
     else:

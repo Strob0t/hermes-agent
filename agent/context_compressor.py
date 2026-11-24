@@ -45,6 +45,21 @@ from agent.context_compressor_tail import (
 )
 from agent.context_compressor_telemetry import CompressionTelemetryMixin
 from agent.error_classifier import ClassifiedError, FailoverReason, classify_api_error
+from agent.tool_rejection import (
+    CANCELLED_STATUS,
+    EMPTY_TOOL_NAME_PREFIX,
+    ERROR_EXECUTING_TOOL_PREFIX,
+    INVALID_JSON_ARGS_PREFIX,
+    LEGACY_SKIPPED_SIBLING_INVALID_NAME_PREFIX,
+    ORPHAN_RECOVERY_PREFIX,
+    REJECTED_STATUS,
+    SKIPPED_SIBLING_INVALID_JSON_PREFIX,
+    TIMEOUT_STATUS,
+    TOOL_EXECUTION_CANCELLED_PREFIX,
+    TOOL_EXECUTION_SKIPPED_PREFIX,
+    UNKNOWN_STATUS,
+    UNKNOWN_TOOL_NAME_TEMPLATE,
+)
 from agent.micro_compaction import MicroCompactionMixin
 from agent.prompt_builder import STEER_DISPLAY_KIND
 from agent.model_metadata import (
@@ -1582,10 +1597,14 @@ def _sum_write_file(name, args, content, content_len, line_count):
 
 
 def _sum_search_files(name, args, content, content_len, line_count):
+    pattern = args.get("pattern", "?")
+    # A failed search must not read as a completed search with "? matches".
+    if failed := _result_failure_suffix(content):
+        return f"[search_files] '{pattern}'{failed}"
     count = m.group(1) if (m := re.search(r'"total_count"\s*:\s*(\d+)', content)) else "?"
     return (
         f"[search_files] {args.get('target', 'content')} search for "
-        f"'{args.get('pattern', '?')}' in {args.get('path', '.')} -> {count} matches"
+        f"'{pattern}' in {args.get('path', '.')} -> {count} matches"
     )
 
 
@@ -1616,6 +1635,9 @@ def _sum_delegate_task(name, args, content, content_len, line_count):
 def _sum_execute_code(name, args, content, content_len, line_count):
     code_str = _str_arg(args, "code")
     code_preview = code_str[:60].replace("\n", " ") + ("..." if len(code_str) > 60 else "")
+    # A failed run must not read as "N lines output".
+    if failed := _result_failure_suffix(content):
+        return f"[execute_code] `{code_preview}`{failed}"
     return f"[execute_code] `{code_preview}` ({line_count} lines output)"
 
 
@@ -1773,7 +1795,11 @@ def _result_failure_suffix(content: str) -> str:
     """`` FAILED: <error>`` for any tool payload with a top-level ``error`` / ``success: false``, else ``""``.
     Without the outcome in the stub a failed call compresses into the same line as a success and the
     post-compaction agent reports the success or chases the stub text as the error (#112710,
-    #131244). Bounded to one line so the stub stays a stub."""
+    #131244). Bounded to one line so the stub stays a stub. The executor's plain-text
+    ``Error executing tool ...`` result is a failure too: it stays plain text because the ACP
+    adapter detects a failed tool by that prefix."""
+    if isinstance(content, str) and content.lstrip().startswith(ERROR_EXECUTING_TOOL_PREFIX):
+        return _failure_suffix(content.strip())
     return _payload_failure_suffix(_json_dict(content))
 
 
@@ -1887,12 +1913,68 @@ def _json_dict(text: Any) -> dict:
     return parsed if isinstance(parsed, dict) else {}
 
 
+_unknown_name = UNKNOWN_TOOL_NAME_TEMPLATE.split("{name}")
+_REJECTED_TOOL_CALL_RE = re.compile(
+    "^" + re.escape(_unknown_name[0]) + r"\S+" + re.escape(_unknown_name[1])
+)
+
+_USER_DENY_OUTCOME = "rejected by approvals.deny: not run, re-issue is forbidden"
+
+
+def _not_run_outcome(status: str) -> str:
+    """Outcome for a call that never ran or whose result is unknown (cancelled/timeout/unknown)."""
+    return f"{status}: not run, re-issue if still needed"
+
+
+def _rejected_tool_call_outcome(content: str) -> str | None:
+    """Outcome for a call the dispatch loop rejected before execution: empty/unknown tool
+    name, invalid JSON arguments, or a valid call skipped because a sibling in the batch
+    was invalid. The generic summarizer renders those rows as ``[...] (N chars result)``,
+    which reads as a completed action; the summary must say "not run"."""
+    stripped = (content or "").lstrip()
+    if stripped.startswith(EMPTY_TOOL_NAME_PREFIX):
+        return "rejected, not run — do not report it as done; re-issue the call"
+    if stripped.startswith(SKIPPED_SIBLING_INVALID_JSON_PREFIX):
+        return "skipped, not run — do not report it as done; re-issue the call"
+    if stripped.startswith(INVALID_JSON_ARGS_PREFIX):
+        return "rejected before execution (invalid JSON arguments), not run — re-issue with valid JSON"
+    if stripped.startswith(LEGACY_SKIPPED_SIBLING_INVALID_NAME_PREFIX):
+        return "skipped, not run — re-issue the call"
+    if _REJECTED_TOOL_CALL_RE.match(stripped):
+        return "rejected, not run — do not report it as done; re-issue with a valid tool name"
+    return None
+
+
+def _never_completed_tool_call_outcome(content: str) -> str | None:
+    """Outcome for a call the execution layer never completed, read from its prose: interrupt
+    skip, timeout, a worker that vanished, or an orphan recovered on resume. Covers the plain
+    ``Error executing tool ...`` results (kept as text for ACP) and transcripts recorded before
+    the structured statuses existed."""
+    stripped = (content or "").lstrip()
+    if stripped.startswith((TOOL_EXECUTION_CANCELLED_PREFIX, TOOL_EXECUTION_SKIPPED_PREFIX)):
+        return _not_run_outcome(CANCELLED_STATUS)
+    if stripped.startswith(ERROR_EXECUTING_TOOL_PREFIX):
+        first_line = stripped.split("\n", 1)[0]
+        if ": timed out after " in first_line:
+            return _not_run_outcome(TIMEOUT_STATUS)
+        if first_line.endswith("tool was not started"):
+            return _not_run_outcome(CANCELLED_STATUS)
+        if first_line.endswith("thread did not return a result"):
+            return _not_run_outcome(UNKNOWN_STATUS)
+        return None
+    if stripped.startswith(ORPHAN_RECOVERY_PREFIX):
+        return _not_run_outcome(UNKNOWN_STATUS)
+    return None
+
+
 def _summarize_refused_tool_result(tool_name: str, args: dict, content: str) -> str | None:
-    """Summary for a call an approval or write guard refused (``BLOCKED: ...`` / ``status``
-    ``blocked``/``pending_approval``), else None. The per-tool summarizers describe the call as done
-    ("ran ...", "wrote to ..."), which would turn a user's denial into a record of the action and
-    drop the "do not retry" instruction. Strictly below _PRUNE_MIN_CHARS, like the clarify summary,
-    so later prune passes keep it."""
+    """Summary for a call that did not run, else None: refused by an approval or write guard
+    (``BLOCKED: ...`` / ``status`` ``blocked``/``pending_approval``), rejected by ``approvals.deny``
+    or by the dispatch loop (``status: rejected``), or never completed by the execution layer
+    (``status`` ``cancelled``/``timeout``/``unknown``, or the matching prose). The per-tool
+    summarizers describe the call as done ("ran ...", "wrote to ..."), which would turn a user's
+    denial or an interrupt into a record of the action and drop the "do not retry" instruction.
+    Strictly below _PRUNE_MIN_CHARS, like the clarify summary, so later prune passes keep it."""
     payload = _json_dict(content)
     status = payload.get("status")
     error = payload.get("error") if isinstance(payload.get("error"), str) else ""
@@ -1900,6 +1982,16 @@ def _summarize_refused_tool_result(tool_name: str, args: dict, content: str) -> 
         error = content.strip()
     if status == "pending_approval":
         outcome = "awaiting the user's approval, not run"
+    elif status == REJECTED_STATUS and "approvals.deny" in error:
+        outcome = _USER_DENY_OUTCOME
+    elif status == REJECTED_STATUS:
+        outcome = _rejected_tool_call_outcome(error) or "rejected, not run — re-issue the call"
+    elif status in (CANCELLED_STATUS, TIMEOUT_STATUS, UNKNOWN_STATUS) and error:
+        outcome = _not_run_outcome(status)
+    elif (rejected := _rejected_tool_call_outcome(content)) is not None:
+        outcome = rejected
+    elif (never_completed := _never_completed_tool_call_outcome(content)) is not None:
+        outcome = never_completed
     elif error and (status == "blocked" or error.lstrip().startswith("BLOCKED")):
         outcome = "BLOCKED, not run"
         if "NOT consented" in error:
