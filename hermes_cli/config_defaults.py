@@ -1752,6 +1752,9 @@ DEFAULT_CONFIG = {
         # enabled (e.g. `elevenlabs`). False = require explicit pip install for everything beyond
         # the base set (restricted/audited/air-gapped environments).
         "allow_lazy_installs": True,
+        # CaMeL trust boundary: mark untrusted tool output; gate sensitive tools on the trusted user plan.
+        # monitor = log only; enforce = block a sensitive call after untrusted data the plan did not authorize.
+        "camel_guard": {"enabled": False, "mode": "monitor"},
     },
 
     "cron": {

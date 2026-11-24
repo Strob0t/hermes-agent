@@ -30,6 +30,7 @@ from agent.display import (
     redact_tool_args_for_display as _redact_tool_args_for_display,
     _detect_tool_failure,
 )
+from agent import camel_guard
 from agent.compression_marker import _COMPRESSION_MARKER_PREFIX
 from agent.interrupt_control import _REASON_USER_INTERRUPT, interrupt_skip_wording
 from agent.tool_rejection import CANCELLED_STATUS, outcome_result
@@ -726,6 +727,11 @@ def _dispatch_authorized_once(
             }
             block_error_type = _PRUNED_TOOL_ARGUMENTS_ERROR
 
+    if block_body is None:
+        camel_block = camel_guard.check_tool_call(agent, ref.name, ref.args)
+        if camel_block is not None:
+            block_body, block_error_type = {"error": camel_block}, "camel_guard_block"
+
     guardrail_decision = None
     if block_body is None:
         guardrail_decision = agent._tool_guardrails.before_call(ref.name, ref.args)
@@ -1169,7 +1175,12 @@ def _commit_tool_result(
     # Multimodal dicts become an OpenAI-style content list; text-only servers get a
     # string-safe fallback so a rejected image result never poisons history.
     _tool_content = agent._tool_result_content_for_active_model(function_name, persisted_result)
+    _camel_untrusted = False
+    if not blocked:
+        _tool_content, _camel_untrusted = camel_guard.mark_tool_result(agent, function_name, _tool_content)
     tool_message = make_tool_result_message(function_name, _tool_content, tool_call_id, effect_disposition=effect_disposition)
+    if _camel_untrusted:
+        tool_message["_camel_untrusted"], tool_message["_camel_source"] = True, function_name
     # A plugin that went live during this turn, and late LSP verdicts on this session's earlier edits,
     # are told on this new row (outside any untrusted-data wrapper).
     lsp_deferred.forward_to_agent(agent)
@@ -1619,6 +1630,7 @@ def execute_tool_calls_concurrent(agent, assistant_message, messages: list, effe
         )
         return
 
+    camel_guard.begin_tool_batch(agent, messages)
     parsed_calls = [_parse_tool_call(agent, tc) for tc in tool_calls]
 
     tool_names_str = ", ".join(pc.name for pc in parsed_calls)
@@ -1906,6 +1918,7 @@ def _execute_tool_calls_sequential(agent, assistant_message, messages: list, eff
     owns turn-end work)."""
     _tool_budget = _budget_for_agent(agent)  # once per turn, not per result
     tool_calls = assistant_message.tool_calls
+    camel_guard.begin_tool_batch(agent, messages)
 
     for i, tool_call in enumerate(tool_calls, 1):
         if getattr(agent, "_incremental_persistence_failed", False):

@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional, Tuple
 
 from agent.conversation_compression import recover_rotated_compression_session
+from agent.camel_guard import strip_api_bookkeeping as strip_camel_bookkeeping
 from agent.iteration_budget import IterationBudget
 from agent.memory_context import build_memory_context_block, sanitize_context
 from agent.memory_provider import is_trivial_prompt
@@ -1502,6 +1503,7 @@ def build_api_messages(
         _api_content = api_msg.pop("api_content", None)
         for key in PERSISTENCE_ONLY_MESSAGE_FIELDS:
             api_msg.pop(key, None)
+        strip_camel_bookkeeping(api_msg)
         # display_metadata just went; keep its replay price for the request estimate (popped after it).
         if isinstance(api_msg, dict) and (_replay_tokens := stamped_reasoning_tokens(msg)):
             api_msg[REQUEST_REASONING_TOKENS] = _replay_tokens
