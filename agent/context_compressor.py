@@ -3621,38 +3621,46 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         _pruned_skill_names = list(dict.fromkeys(
             _collect_ghosted_skill_names(turns_to_summarize) + _extract_pruned_skill_names(self._previous_summary or "")
         ))[:_MAX_PRUNED_SKILL_MARKERS]
-        # Lean mode even-samples oversized input (one bounded request, never a second).
-        if getattr(self, "tail_mode", "lean") == "lean":
-            records = self._serialize_records_for_summary(turns_to_summarize)
-            slices: list = []
-            content_to_summarize, coverage = self._sample_summary_records(records, slices)
-            self._record_summary_input_coverage(coverage)
-            # Typed turns (#146750): user, assistant tool_calls and tool output each keep their real role.
-            # Typed rows (async-delegation results, notices; not /steer) and flagged nudges are not user input.
-            typed_turns = typed_summary_messages(
-                turns_to_summarize, records, slices,
-                lambda m: self._is_real_user_turn(m) and not is_user_role_scaffolding(m),
-                self._render_tool_args_for_summary,
-            )
-            content_to_summarize = TYPED_TURNS_POINTER
-        else:
-            typed_turns = []
-            content_to_summarize = self._bound_summary_input(self._serialize_for_summary(turns_to_summarize))
+        records = self._serialize_records_for_summary(turns_to_summarize)
+        passes = self._summary_pass_units(turns_to_summarize, records)
         has_user_turn = getattr(self, "_summary_has_user_turn", None)
         if has_user_turn is None:
             has_user_turn = self._transcript_has_real_user_turn(turns_to_summarize)
-        messages = self._build_summary_prompt(content_to_summarize, summary_budget, focus_topic, memory_context, has_user_turn)
-        messages[1:1] = typed_turns
+        if len(passes) > 1:
+            telemetry = getattr(self, "_active_compression_telemetry", None)
+            if isinstance(telemetry, dict):
+                telemetry["chunk_count"] = len(passes)
         try:
-            content = self._call_summary_llm(messages, prompt_started_at)
-            # Strip <think> blocks: they would be stored, injected, and compounded on every iterative update.
-            from agent.agent_runtime_helpers import strip_think_blocks
-            content = strip_think_blocks(None, content).strip() or content
-            # The summarizer may echo secrets verbatim; redact the output too.
-            summary = _redact_compaction_text(content.strip())
-            # Restore any [SKILL_PRUNED] marker the summarizer paraphrased away.
-            # See #32106.
-            summary = _reinject_pruned_skill_markers(summary, _pruned_skill_names)
+            # Oversized input runs in ordered passes, each folded into a running summary that lives only
+            # in this frame: _previous_summary changes only after the final pass, so a failed or
+            # cancelled later pass leaves the pre-compaction state untouched.
+            running_summary: Optional[str] = None
+            coverage_total: dict[str, int] = {}
+            for index, (pass_turns, pass_records) in enumerate(passes):
+                content_to_summarize, typed_turns, coverage = self._summary_pass_input(pass_turns, pass_records)
+                if coverage:
+                    for key, value in coverage.items():
+                        coverage_total[key] = coverage_total.get(key, 0) + value
+                    self._record_summary_input_coverage(coverage_total)
+                messages = self._build_summary_prompt(
+                    content_to_summarize, summary_budget, focus_topic, memory_context, has_user_turn,
+                    running_summary=running_summary,
+                )
+                messages[1:1] = typed_turns
+                content = self._call_summary_llm(messages, prompt_started_at)
+                # Strip <think> blocks: they would be stored, injected, and compounded on every iterative update.
+                from agent.agent_runtime_helpers import strip_think_blocks
+                content = strip_think_blocks(None, content).strip() or content
+                # The summarizer may echo secrets verbatim; redact the output too.
+                summary = _redact_compaction_text(content.strip())
+                # Restore any [SKILL_PRUNED] marker the summarizer paraphrased away.
+                # See #32106.
+                summary = _reinject_pruned_skill_markers(summary, _pruned_skill_names)
+                if index < len(passes) - 1:
+                    running_summary = summary
+                    prompt_started_at = time.monotonic()
+                    if self._compression_cancelled():
+                        raise AuxiliaryExplicitCancellation()
             summary = self._ground_historical_task_snapshot(summary, turns_to_summarize)
             summary = self._augment_summary_lean(summary, turns_to_summarize)
             self._validate_summary_user_provenance(summary, has_user_turn)
@@ -3669,6 +3677,91 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         except Exception as e:  # health: allow BLE001 -- unchanged summary boundary: every failure goes to _on_summary_failure
             return self._on_summary_failure(e, turns_to_summarize, focus_topic, memory_context)
 
+    def _summary_pass_input(
+        self, turns: list[dict[str, Any]], records: list[str],
+    ) -> tuple[str, list[dict[str, Any]], Optional[dict[str, int]]]:
+        """Summarizer input for one pass: (content, typed turns, lean coverage or None)."""
+        # Lean mode even-samples oversized input; a pass from _summary_pass_units already fits the bound.
+        if getattr(self, "tail_mode", "lean") == "lean":
+            slices: list = []
+            _, coverage = self._sample_summary_records(records, slices)
+            # Typed turns (#146750): user, assistant tool_calls and tool output each keep their real role.
+            # Typed rows (async-delegation results, notices; not /steer) and flagged nudges are not user input.
+            typed_turns = typed_summary_messages(
+                turns, records, slices,
+                lambda m: self._is_real_user_turn(m) and not is_user_role_scaffolding(m),
+                self._render_tool_args_for_summary,
+            )
+            return TYPED_TURNS_POINTER, typed_turns, coverage
+        return self._bound_summary_input("\n\n".join(records)), [], None
+
+    def _summary_pass_units(
+        self, turns: list[dict[str, Any]], records: list[str],
+    ) -> list[tuple[list[dict[str, Any]], list[str]]]:
+        """Split turns (1:1 with records) into ordered passes whose joined records fit the input bound.
+
+        An assistant tool-call row stays in one pass with its tool results unless the group alone is
+        over the bound; a single record over the bound becomes ordered fragment rows."""
+        limit = self._SUMMARY_INPUT_MAX_CHARS
+        separator = 2
+        if sum(len(r) for r in records) + separator * max(len(records) - 1, 0) <= limit:
+            return [(list(turns), list(records))]
+        groups: list[list[int]] = []
+        index = 0
+        while index < len(turns):
+            group = [index]
+            turn = turns[index]
+            call_ids = {
+                str(tc.get("id")) for tc in (turn.get("tool_calls") or ()) if isinstance(tc, dict) and tc.get("id")
+            } if turn.get("role") == "assistant" else set()
+            while (
+                call_ids and index + len(group) < len(turns)
+                and turns[index + len(group)].get("role") == "tool"
+                and str(turns[index + len(group)].get("tool_call_id") or "") in call_ids
+            ):
+                group.append(index + len(group))
+            groups.append(group)
+            index += len(group)
+
+        passes: list[tuple[list[dict[str, Any]], list[str]]] = []
+        cur_turns: list[dict[str, Any]] = []
+        cur_records: list[str] = []
+        cur_len = 0
+
+        def flush() -> None:
+            nonlocal cur_turns, cur_records, cur_len
+            if cur_turns:
+                passes.append((cur_turns, cur_records))
+            cur_turns, cur_records, cur_len = [], [], 0
+
+        def add(unit_turns: list[dict[str, Any]], unit_records: list[str]) -> None:
+            nonlocal cur_len
+            size = sum(len(r) for r in unit_records) + separator * (len(unit_records) - 1)
+            if cur_turns and cur_len + separator + size > limit:
+                flush()
+            cur_len += size + (separator if cur_turns else 0)
+            cur_turns.extend(unit_turns)
+            cur_records.extend(unit_records)
+
+        for group in groups:
+            group_records = [records[i] for i in group]
+            if sum(len(r) for r in group_records) + separator * (len(group) - 1) <= limit:
+                add([turns[i] for i in group], group_records)
+                continue
+            for i in group:
+                if len(records[i]) <= limit:
+                    add([turns[i]], [records[i]])
+                    continue
+                role = str(turns[i].get("role") or "unknown").upper()
+                label_width = len(f"[{role} FRAGMENT {len(records[i])}/{len(records[i])}]: ")
+                step = max(1, limit - label_width)
+                total = (len(records[i]) + step - 1) // step
+                for part, offset in enumerate(range(0, len(records[i]), step), start=1):
+                    fragment = f"[{role} FRAGMENT {part}/{total}]: " + records[i][offset:offset + step]
+                    add([{"role": "assistant", "content": fragment}], [fragment])
+        flush()
+        return passes
+
     def _record_summary_success(self, summary: str) -> None:
         """A healthy summary becomes the iterative base and clears the failure state."""
         self._previous_summary = summary
@@ -3681,7 +3774,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
 
     def _build_summary_prompt(
         self, content_to_summarize: str, summary_budget: int, focus_topic: Optional[str],
-        memory_context: str, has_user_turn: bool,
+        memory_context: str, has_user_turn: bool, *, running_summary: Optional[str] = None,
     ) -> list[dict[str, str]]:
         """Assemble the summarizer request (fresh or iterative-update form) as ``[system, user]``.
 
@@ -3710,9 +3803,11 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         # Lean mode folds the session log into this SAME single request (one aux call).
         _session_log_section = _LEAN_SESSION_LOG_SECTION if getattr(self, "tail_mode", "lean") == "lean" else ""
         _template_sections = self._summary_template_sections(_section, summary_budget, _session_log_section)
-        if self._previous_summary:
+        # ``running_summary`` is the summary of earlier passes of this same compaction.
+        previous_summary = running_summary if running_summary is not None else self._previous_summary
+        if previous_summary:
             # Iterative update. Bound the previous summary too: a rehydrated handoff can be huge.
-            _bounded_previous_summary = self._bound_summary_input(self._previous_summary)
+            _bounded_previous_summary = self._bound_summary_input(previous_summary)
             instructions = f"""{_summarizer_preamble}
 
 You are updating a context compaction summary. A previous compaction produced the summary below. New conversation turns have occurred since then and need to be incorporated.

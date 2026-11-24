@@ -50,6 +50,15 @@ def _llm_response(text):
     return resp
 
 
+def _call_prompts(mock_call):
+    return ["\n".join(m["content"] for m in call.kwargs["messages"]) for call in mock_call.call_args_list]
+
+
+def _assert_each_round_in_one_pass(prompts, n_rounds):
+    for i in range(n_rounds):
+        assert sum(f"round {i} output: " in prompt for prompt in prompts) == 1, i
+
+
 def _big_region(n_rounds=60, tool_chars=6_000):
     """Synthetic compacted region: user + assistant/tool rounds, ~360K chars."""
     turns = [
@@ -79,7 +88,20 @@ SUMMARY_BODY = (
 
 class TestLeanSingleAuxiliaryCall:
     def test_exactly_one_call_llm_per_lean_attempt(self):
+        """Lean input below the bound makes exactly one auxiliary request; input over the bound
+        makes more than one, and every round reaches exactly one of them."""
         c = _mk_compressor()
+        with patch(
+            "agent.context_compressor.call_llm",
+            return_value=_llm_response(SUMMARY_BODY),
+        ) as main_call, patch(
+            "agent.auxiliary_client.call_llm",
+            return_value=_llm_response(SUMMARY_BODY),
+        ) as aux_call:
+            summary = c._generate_summary(_big_region(n_rounds=5))
+        assert summary is not None
+        assert main_call.call_count + aux_call.call_count == 1
+
         turns = _big_region()
         with patch(
             "agent.context_compressor.call_llm",
@@ -90,8 +112,9 @@ class TestLeanSingleAuxiliaryCall:
         ) as aux_call:
             summary = c._generate_summary(turns)
         assert summary is not None
-        # THE contract: one auxiliary request per compaction attempt, total.
-        assert main_call.call_count + aux_call.call_count == 1
+        assert aux_call.call_count == 0
+        assert main_call.call_count > 1
+        _assert_each_round_in_one_pass(_call_prompts(main_call), 60)
 
     def test_session_log_heading_lands_in_summary(self):
         c = _mk_compressor()
@@ -117,6 +140,8 @@ class TestLeanSingleAuxiliaryCall:
         assert "session_search" in summary
 
     def test_oversized_region_sampled_not_split_into_more_requests(self):
+        """An oversized lean region is split into several bounded requests in order, with no
+        elided middle: every round reaches exactly one request."""
         c = _mk_compressor()
         turns = _big_region(n_rounds=120, tool_chars=6_000)  # ~720K chars raw
         with patch(
@@ -124,11 +149,14 @@ class TestLeanSingleAuxiliaryCall:
             return_value=_llm_response(SUMMARY_BODY),
         ) as mock_call:
             c._generate_summary(turns)
-        assert mock_call.call_count == 1
-        prompt = "\n".join(m["content"] for m in mock_call.call_args.kwargs["messages"])
-        # Bounded input with explicit elision markers, not a second request.
-        assert len(prompt) <= c._SUMMARY_INPUT_MAX_CHARS + 20_000
-        assert "chars elided" in prompt
+        assert mock_call.call_count > 1
+        prompts = _call_prompts(mock_call)
+        for prompt in prompts:
+            assert len(prompt) <= c._SUMMARY_INPUT_MAX_CHARS + 20_000
+            assert "chars elided" not in prompt
+        _assert_each_round_in_one_pass(prompts, 120)
+        first_pass = [min(n for n, prompt in enumerate(prompts) if f"round {i} output: " in prompt) for i in range(120)]
+        assert first_pass == sorted(first_pass)
 
 
 class TestSampledSummaryInput:
@@ -151,6 +179,9 @@ class TestSampledSummaryInput:
         assert "<seg09>" in out
 
     def test_legacy_mode_keeps_head_tail_bound(self):
+        """Legacy mode also splits oversized input into several passes, so no pass needs the
+        head/tail truncation and every round reaches exactly one pass. Input below the bound
+        stays one call."""
         c = _mk_compressor(tail_mode="legacy")
         turns = _big_region(n_rounds=120, tool_chars=6_000)
         with patch(
@@ -158,9 +189,18 @@ class TestSampledSummaryInput:
             return_value=_llm_response("## Historical Task Snapshot\nNone."),
         ) as mock_call:
             c._generate_summary(turns)
-        assert mock_call.call_count == 1
-        prompt = "\n".join(m["content"] for m in mock_call.call_args.kwargs["messages"])
-        assert "summary input truncated" in prompt
+        assert mock_call.call_count > 1
+        prompts = _call_prompts(mock_call)
+        for prompt in prompts:
+            assert "summary input truncated" not in prompt
+        _assert_each_round_in_one_pass(prompts, 120)
+
+        with patch(
+            "agent.context_compressor.call_llm",
+            return_value=_llm_response("## Historical Task Snapshot\nNone."),
+        ) as small_call:
+            c._generate_summary(_big_region(n_rounds=5))
+        assert small_call.call_count == 1
 
 
 if __name__ == "__main__":
