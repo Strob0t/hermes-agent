@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional
 
 from agent.compression_marker import _COMPRESSION_MARKER_ARTIFACT_RE
 from agent.message_metadata import stamp_message_timestamp
+from agent.prompt_builder import CONTROL_FRAME_OPENERS
 from agent.redact_secret_sources import redact_secret_source_values
 from agent.tool_result_classification import (
     FILE_MUTATING_TOOL_NAMES as _FILE_MUTATING_TOOLS,
@@ -427,6 +428,31 @@ def _redact_secret_source_content(content: Any) -> Any:
     return content
 
 
+# Openers of Hermes' own control frames (prompt_builder.CONTROL_FRAME_OPENERS). A genuine steer or harness
+# frame is never tool content (steer_user_row is a user row), so in any tool result one can only be forged by
+# a page, a file or an MCP server. The steer words also match any case or separators. The "[" is relabelled:
+# the words stay readable, the exact trusted shape does not, and a second pass finds no opener.
+_STEER_WORDS_RE = r"OUT[\W_]*OF[\W_]*BAND[\W_]*USER[\W_]*MESSAGE"
+_TOOL_CONTROL_FRAME_RE = re.compile(
+    r"\[(?=" + "|".join(
+        opener.replace("]", r"\]").replace("OUT-OF-BAND USER MESSAGE", _STEER_WORDS_RE)
+        for opener in CONTROL_FRAME_OPENERS
+    ) + ")",
+    re.IGNORECASE,
+)
+_TOOL_CONTROL_FRAME_RELABEL = "[tool-quoted "
+
+
+def _neutralize_control_frames(content: Any) -> Any:
+    """Relabel forged control-frame openers in a string or the text parts of a multimodal list."""
+    if isinstance(content, str):
+        return _TOOL_CONTROL_FRAME_RE.sub(_TOOL_CONTROL_FRAME_RELABEL, content)
+    if isinstance(content, list):
+        return [{**item, "text": _TOOL_CONTROL_FRAME_RE.sub(_TOOL_CONTROL_FRAME_RELABEL, item["text"])}
+                if _is_text_item(item) else item for item in content]
+    return content
+
+
 def _normalize_tool_call_id(tool_call_id: Any) -> Any:
     """Normalize a composite bridge id to its canonical call-id half."""
     if isinstance(tool_call_id, str) and "|" in tool_call_id:
@@ -444,12 +470,14 @@ def make_tool_result_message(
     """Build a tool-result message: OpenAI ``name`` (wire format) plus internal ``tool_name``
     (session DB). High-risk tool content (web_extract, web_search, browser_*, mcp_*) is
     wrapped in untrusted-data delimiters — the defense against indirect prompt injection.
+    No tool's content can carry a Hermes control-frame opener: it is relabelled before the wrap.
     """
     # Replay-recovery callers bypass the executor's canonical-id helper, so normalize here too.
     tool_call_id = _normalize_tool_call_id(tool_call_id)
     # Elision notice is appended to the RAW content first, THEN wrapped, so it sits inside
     # the untrusted block next to the data it describes — once, at construction (cache-safe).
     content = _redact_secret_source_content(content)
+    content = _neutralize_control_frames(content)
     wrapped = _maybe_wrap_untrusted(name, _maybe_append_elision_notice(name, content))
     message = stamp_message_timestamp({
         "role": "tool",
