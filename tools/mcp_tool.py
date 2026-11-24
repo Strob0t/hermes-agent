@@ -477,6 +477,11 @@ class MCPServerTask(MCPServerRunMixin, MCPServerTransportMixin, MCPServerHealthM
         # call): serialize client-initiated RPCs per server (HTTP too, for ordering).
         self._rpc_lock = asyncio.Lock()
         self._pending_refresh_tasks: set[asyncio.Task] = set()
+        # list_changed flood guard: the one live refresh task, demand that arrived while it ran, and
+        # consecutive failures driving its cooldown (see _refresh_tools_task).
+        self._refresh_task: Optional[asyncio.Task] = None
+        self._refresh_dirty: bool = False
+        self._refresh_failures: int = 0
         # contextvars snapshot inside session.call_tool(): the SDK runs elicitation/create on a
         # task that does not inherit HERMES_SESSION_PLATFORM, so the callback replays this.
         self._pending_call_context: Optional[contextvars.Context] = None

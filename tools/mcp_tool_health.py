@@ -9,12 +9,18 @@ import time
 from typing import Iterable, Optional
 from tools.mcp_tool_errors import _is_method_not_found_error
 from tools.mcp_tool_schema import mcp_prefixed_tool_name
-from tools.mcp_tool_common import _core
+from tools.mcp_tool_common import _core, _jittered
 from tools import mcp_tool_registration as _registration
 
 logger = logging.getLogger("tools.mcp_tool")
 
 _KEEPALIVE_RPC_TIMEOUT = 30.0
+# list_changed flood guard: ONE refresh task per server, throttled, with an exponential cooldown
+# after consecutive failures so a dead server is probed, not hammered by a queued backlog.
+_REFRESH_MIN_INTERVAL_SECONDS = 2.0
+_REFRESH_FAILURE_THRESHOLD = 3
+_REFRESH_COOLDOWN_BASE_SECONDS = 30.0
+_REFRESH_COOLDOWN_MAX_SECONDS = 600.0
 
 
 class MCPServerHealthMixin:
@@ -56,16 +62,50 @@ class MCPServerHealthMixin:
         self._recycled_reason = reason
         self.session = None
 
-    def _schedule_tools_refresh(self) -> asyncio.Task:
-        """Schedule a background tool refresh (failures logged) and keep it strongly referenced."""
-        async def _run():
+    async def _refresh_tools_task(self):
+        """Drain coalesced refresh demand (dirty flag), at most one refresh per min interval. After
+        the failure threshold, drop pending demand and sleep a jittered exponential cooldown before
+        one probe; exit unless new demand arrived (run()'s reconnect ladder owns revival)."""
+        cooldown = 0.0
+        while True:
             try:
                 await self._refresh_tools()
+                self._refresh_failures = 0
+                cooldown = 0.0
+            except asyncio.CancelledError:
+                raise
             except Exception:
-                logger.exception("MCP server '%s': dynamic tool refresh failed", self.name)
-        task = asyncio.create_task(_run())
+                self._refresh_failures += 1
+                logger.exception("MCP server '%s': dynamic tool refresh failed (%d consecutive)",
+                                 self.name, self._refresh_failures)
+                if self._refresh_failures >= _REFRESH_FAILURE_THRESHOLD:
+                    self._refresh_dirty = False
+                    cooldown = min(max(cooldown * 2.0, _REFRESH_COOLDOWN_BASE_SECONDS),
+                                   _REFRESH_COOLDOWN_MAX_SECONDS)
+                    logger.warning("MCP server '%s': %d consecutive refresh failures, cooling down %.0fs "
+                                   "(pending notifications coalesced)", self.name, self._refresh_failures, cooldown)
+                    await asyncio.sleep(_jittered(cooldown))
+                    if not self._refresh_dirty:
+                        return
+                    self._refresh_dirty = False
+                    continue
+            if not self._refresh_dirty:
+                return
+            self._refresh_dirty = False
+            await asyncio.sleep(_REFRESH_MIN_INTERVAL_SECONDS)
+
+    def _schedule_tools_refresh(self) -> Optional[asyncio.Task]:
+        """Schedule a coalesced background tool refresh and keep it strongly referenced. While the
+        one refresh task is alive, a notification only sets the dirty flag (returns None)."""
+        task = self._refresh_task
+        if task is not None and not task.done():
+            self._refresh_dirty = True
+            return None
+        self._refresh_dirty = False
+        task = asyncio.create_task(self._refresh_tools_task())
         self._pending_refresh_tasks.add(task)
         task.add_done_callback(self._pending_refresh_tasks.discard)
+        self._refresh_task = task
         return task
 
     def _make_logging_callback(self):
