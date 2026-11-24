@@ -17,6 +17,7 @@ from typing import Any, Dict, Optional
 from agent.error_classifier import FailoverReason
 from agent.agent_runtime_helpers_placeholders import hidden_interrupt_placeholder_row
 from agent.message_metadata import append_message
+from agent.rate_limit_throttle import throttle_before_request
 from agent.repetition_guard import REPETITION_LOOP_INTERRUPTED, is_runaway_repetition
 from agent.turn_failure_copy import site_copy, stamp_failure
 
@@ -76,6 +77,7 @@ def perform_api_call(
     interrupted: Any,
 ) -> ApiCallVerdict:
     """Issue the request (see ``_should_stream`` for the streaming decision)."""
+    throttle_before_request(agent, agent.provider, agent.model, api_kwargs)
     response = None
 
     def _verdict(action: str) -> ApiCallVerdict:

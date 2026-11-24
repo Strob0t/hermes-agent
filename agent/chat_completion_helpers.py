@@ -43,6 +43,7 @@ from agent.model_metadata import is_local_endpoint
 from agent.process_transport import waits_like_local
 from session_rules.turns import flatten_message_text
 from agent.message_metadata import PERSISTENCE_ONLY_MESSAGE_FIELDS, append_message, data_use_requirement, stamp_message_timestamp
+from agent.rate_limit_throttle import record_input_tokens, throttle_before_request
 from agent.message_sanitization import (
     _sanitize_messages_surrogates, _sanitize_surrogates, _repair_tool_call_arguments,
     normalize_finish_reason as _normalize_finish_reason, sanitize_outbound_kwargs, strip_images_for_rejecting_model,
@@ -2156,14 +2157,27 @@ def _summary_request_middleware(agent, request, api_request_id: str, api_call_co
 
 
 def _managed_summary_call(agent, api_request_id: str, request, callback, *, retry_count: int):
+    provider = str(getattr(agent, "provider", "") or "")
+    model = str(getattr(agent, "model", "") or "")
+    throttle_before_request(agent, provider, model, request)
     from agent import relay_llm
-    return relay_llm.execute_current(
+    response = relay_llm.execute_current(
         request, callback,
-        name=str(getattr(agent, "provider", "") or "provider"), model_name=str(getattr(agent, "model", "") or ""),
+        name=provider or "provider", model_name=model,
         metadata={"api_mode": str(getattr(agent, "api_mode", "") or "chat_completions"),
             "api_request_id": api_request_id, "call_role": "iteration_summary", "retry_count": retry_count},
         defer_logical_completion=True,
     )
+    # This path skips turn_usage.record_response_usage, so the TPM bucket is fed here.
+    usage = getattr(response, "usage", None)
+    if usage:
+        try:
+            from agent.usage_pricing import normalize_usage
+            canonical_usage = normalize_usage(usage, provider=provider, api_mode=getattr(agent, "api_mode", ""))
+            record_input_tokens(provider, model, canonical_usage.prompt_tokens, agent=agent)
+        except Exception:
+            pass
+    return response
 
 
 def _summary_text(agent, response, **normalize_kwargs) -> str:

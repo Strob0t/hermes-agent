@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from agent.image_token_cost import calibrate_from_usage
+from agent.rate_limit_throttle import record_input_tokens
 from agent.usage_anchor import capture_usage_anchor, set_usage_anchor
 from agent.usage_pricing import estimate_usage_cost, normalize_usage, with_served_service_tier
 
@@ -174,6 +175,9 @@ def record_response_usage(
     # OWN model rate and added as dollars below.
     aggregator_usage = canonical_usage
     _moa_client, canonical_usage, _moa_ref_cost = _fold_moa_usage(agent, canonical_usage)
+    # Pre-MoA-fold: advisor tokens count against their own providers' TPM ceilings.
+    with suppress(Exception):
+        record_input_tokens(agent.provider, agent.model, aggregator_usage.prompt_tokens, agent=agent)
     prompt_tokens = canonical_usage.prompt_tokens
     completion_tokens = canonical_usage.output_tokens
     total_tokens = canonical_usage.total_tokens
