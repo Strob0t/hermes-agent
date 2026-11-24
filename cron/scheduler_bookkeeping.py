@@ -25,7 +25,8 @@ def finish_interrupted_run(job, execution_id, delivery_error):
         except Exception as exc:
             logger.debug('Failed recording delivery_error for interrupted job %s: %s', job['id'], exc, exc_info=True)
     scheduler.finish_execution(execution_id, success=False,
-                               error='Interrupted by gateway shutdown before terminal completion.')
+                               error='Interrupted by gateway shutdown before terminal completion.',
+                               delivery_error=delivery_error)
 
 
 def _classify_delivery_outcome(
@@ -91,7 +92,8 @@ def finish_completed_run(d, fire_owner: Optional[str], execution_id: str, *, rec
     if fire_owner is not None and not marked:
         scheduler.finish_execution(
             execution_id, success=False,
-            error="Fire claim ownership lost before terminal completion.")
+            error="Fire claim ownership lost before terminal completion.",
+            delivery_error=d.delivery_error)
         return True
     delivery_outcome = _classify_delivery_outcome(
         delivery_error=d.delivery_error,
@@ -116,7 +118,8 @@ def finish_completed_run(d, fire_owner: Optional[str], execution_id: str, *, rec
     from cron.executions import FIRER_FINISHED_STATES, get_execution, recover_receipted_execution
     finish = partial(recover_receipted_execution, job_id=job['id']) if recovered else scheduler.finish_execution
     finished = finish(
-        execution_id, success=d.success, error=d.error, delivery_outcome=delivery_outcome)
+        execution_id, success=d.success, error=d.error, delivery_outcome=delivery_outcome,
+        delivery_error=d.delivery_error)
     if recovered and finished is None:
         current = get_execution(execution_id)
         # A live foreign firer still owns this row. Keep its only recovery link until settlement.
