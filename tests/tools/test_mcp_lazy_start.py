@@ -248,7 +248,7 @@ class TestLazyFirstUseConnect:
             _registered_tool_names=["mcp_playwright_browser_navigate"],
         )
 
-        def _fake_run(coro_or_factory, timeout=30):
+        def _fake_run(coro_or_factory, timeout=30, **_kwargs):
             mcp._servers["playwright"] = connected
             coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
             coro.close()
@@ -280,7 +280,7 @@ class TestLazyFirstUseConnect:
             _registered_tool_names=["mcp_playwright_tool_y"],
         )
 
-        def _fake_run(coro_or_factory, timeout=30):
+        def _fake_run(coro_or_factory, timeout=30, **_kwargs):
             mcp._servers["playwright"] = connected
             coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
             coro.close()
@@ -296,7 +296,7 @@ class TestLazyFirstUseConnect:
     def test_lazy_connect_failure_records_cooldown(self):
         mcp._lazy_server_configs["playwright"] = {"command": "npx", "lazy": True}
 
-        def _fake_run(coro_or_factory, timeout=30):
+        def _fake_run(coro_or_factory, timeout=30, **_kwargs):
             coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
             coro.close()
             raise RuntimeError("spawn failed")
