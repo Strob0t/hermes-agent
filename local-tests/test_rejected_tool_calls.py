@@ -16,23 +16,20 @@ import json
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
-_HOME = tempfile.mkdtemp(prefix="hermes-home-")
-os.environ["HERMES_HOME"] = _HOME
-with open(os.path.join(_HOME, "config.yaml"), "w", encoding="utf-8") as fh:
-    fh.write("approvals:\n  mode: \"off\"\n  deny:\n    - \"rm -rf /srv/*\"\n")
-
-from agent.context_compressor import _summarize_tool_result  # noqa: E402
-from agent.replay_cleanup import _orphan_recovery, _INTERRUPTED_NOTICES  # noqa: E402
-from agent.tool_rejection import (  # noqa: E402
+from hermes_cli import config as config_mod
+from agent.context_compressor import _summarize_tool_result
+from agent.replay_cleanup import _orphan_recovery, _INTERRUPTED_NOTICES
+from agent.tool_rejection import (
     CANCELLED_STATUS,
     ERROR_EXECUTING_TOOL_PREFIX,
     REJECTED_STATUS,
     TIMEOUT_STATUS,
     outcome_result,
 )
-from agent.tool_executor import _ToolCallRef, _unfinished_tool_result  # noqa: E402
-from tools import terminal_tool  # noqa: E402
+from agent.tool_executor import _ToolCallRef, _unfinished_tool_result
+from tools import terminal_tool
 
 DENIED = "rm -rf /srv/data"
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -55,7 +52,25 @@ def terminal_args(command):
     return json.dumps({"command": command})
 
 
+def clear_config_caches():
+    config_mod._LOAD_CONFIG_CACHE.clear()
+    config_mod._RAW_CONFIG_CACHE.clear()
+
+
 class DenyPathTest(unittest.TestCase):
+    """Other test modules set HERMES_HOME at import, so each test binds its own home with the deny rule."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory(prefix="hermes-home-")
+        self.addCleanup(tmp.cleanup)
+        with open(os.path.join(tmp.name, "config.yaml"), "w", encoding="utf-8") as fh:
+            fh.write("approvals:\n  mode: \"off\"\n  deny:\n    - \"rm -rf /srv/*\"\n")
+        env = patch.dict(os.environ, {"HERMES_HOME": tmp.name})
+        env.start()
+        self.addCleanup(env.stop)
+        clear_config_caches()
+        self.addCleanup(clear_config_caches)
+
     def denied_result(self):
         with self.assertRaises(terminal_tool._Rejected) as ctx:
             terminal_tool._run_approval_guards(DENIED, "local", {}, force=False)
