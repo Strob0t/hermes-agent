@@ -5,6 +5,7 @@ docs of config.yaml.
 """
 
 from hermes_cli.config_defaults_auxiliary import _aux
+from hermes_cli.config_defaults_tool_output import TOOL_OUTPUT_DEFAULTS
 from hermes_cli.config_defaults_voice import VOICE_DEFAULTS
 
 #: Image every container terminal backend (docker/modal/daytona, the singularity plugin) uses unless the
@@ -543,7 +544,8 @@ DEFAULT_CONFIG = {
     # Tool-output truncation. max_bytes: terminal_tool output cap in chars (head+tail kept; 50_000 ≈
     # 12-15K tokens). max_lines: max `limit` one read_file call may request before clamping.
     # max_line_length: per-line cap in read_file's line-numbered view (chars).
-    "tool_output": {"max_bytes": 50000, "max_lines": 2000, "max_line_length": 2000},
+    # json_compaction: see config_defaults_tool_output.py.
+    "tool_output": TOOL_OUTPUT_DEFAULTS,
     # Tool loop guardrails nudge models that repeat failed/non-progressing tool calls. Soft warnings
     # are always on; hard stops are opt-in so interactive sessions keep flowing.
     "tool_loop_guardrails": {
