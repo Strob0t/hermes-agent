@@ -665,6 +665,36 @@ async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str
 
 # ---------------------------------------------------------- result rendering
 
+
+def _redact_mcp_results_enabled() -> bool:
+    try:
+        from hermes_cli.config import load_config_readonly
+        return (load_config_readonly().get("security") or {}).get("redact_mcp_results") is True
+    except Exception:
+        return False
+
+
+def _redact_mcp_values(value: Any) -> Any:
+    """Redact every string value (not the keys) of a JSON-able payload before it is serialized, so a
+    mask never cuts through a JSON escape sequence."""
+    from agent.redact import redact_sensitive_text
+    if isinstance(value, str):
+        return redact_sensitive_text(value, file_read=True)
+    if isinstance(value, dict):
+        return {k: _redact_mcp_values(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_redact_mcp_values(v) for v in value]
+    return value
+
+
+def _mcp_result_json(payload: Any) -> str:
+    """Handler JSON for an MCP result. ``security.redact_mcp_results`` (off by default) scrubs the
+    complete payload: text, ``structuredContent``, ``_meta``, resource reads and prompt messages."""
+    if _redact_mcp_results_enabled():
+        payload = _redact_mcp_values(payload)
+    return json.dumps(payload, ensure_ascii=False)
+
+
 def _error_result_text(result) -> str:
     """Concatenated text of an ``isError`` result's blocks (EmbeddedResource error payloads
     carry text under ``.resource.text``)."""
@@ -819,7 +849,7 @@ def _render_call_tool_result(result, server_name: str, image_paths: Optional[lis
         elif for_model:
             text_result, structured = _collapse_sdk_wrapped_copy(result, text_result, structured, usable_parts)
     if structured is None and meta is None:
-        return json.dumps({"result": text_result}, ensure_ascii=False)
+        return _mcp_result_json({"result": text_result})
     # Key order is part of the output: "result" leads when there is text, otherwise "_meta" precedes it.
     payload: dict[str, Any] = {"result": text_result} if text_result else {}
     # Cap structuredContent too — a malicious server could flood context via a multi-MB JSON payload
@@ -831,9 +861,9 @@ def _render_call_tool_result(result, server_name: str, image_paths: Optional[lis
         payload["_meta"] = meta
     payload.setdefault("result", text_result)
     try:
-        return json.dumps(payload, ensure_ascii=False)
+        return _mcp_result_json(payload)
     except (TypeError, ValueError):  # Non-serializable metadata: drop the extras, keep the call.
-        return json.dumps({"result": text_result}, ensure_ascii=False)
+        return _mcp_result_json({"result": text_result})
 
 
 def _make_tool_handler(server_name: str, tool_name: str, tool_timeout: float, *, native_images: bool = False):
@@ -957,7 +987,7 @@ def _make_utility_handler(op: str, log_label: str, rpc, render, required: Option
             async def _call():
                 async with server._rpc_lock:
                     result = await rpc(server.session, args, server_name)
-                return json.dumps(render(result, server_name), ensure_ascii=False)
+                return _mcp_result_json(render(result, server_name))
             return _dispatch(
                 server_name, server, op, _call, tool_timeout,
                 (_handle_auth_error_and_retry, _handle_session_expired_and_retry),
