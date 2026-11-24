@@ -506,6 +506,118 @@ def _persist_data_url_image(url_value: str) -> Optional[CachedMedia]:
     return CachedMedia(str(stable), cached.media_type, cached.kind, cached.display_name)
 
 
+def _image_vision_routing_enabled() -> bool:
+    """gateway.api_server.image_vision_routing (default off; unreadable config -> off)."""
+    try:
+        from hermes_cli.config import cfg_get, load_config
+        return cfg_get(load_config(), "gateway", "api_server", "image_vision_routing", default=False) is True
+    except Exception:
+        return False
+
+
+def _decide_api_server_image_mode() -> str:
+    """``"native"`` / ``"text"`` for the main model (agent/image_routing.py); failure -> native."""
+    try:
+        from agent.auxiliary_client import _read_main_model, _read_main_provider
+        from agent.image_routing import decide_image_input_mode
+        from hermes_cli.config import load_config
+        return decide_image_input_mode(_read_main_provider(), _read_main_model(), load_config())
+    except Exception as exc:
+        logger.debug("api_server image_routing: decision failed, keeping native: %s", exc)
+        return "native"
+
+
+def _image_part_url(part: Any) -> Optional[str]:
+    if not isinstance(part, dict) or str(part.get("type") or "").strip().lower() not in _IMAGE_PART_TYPES:
+        return None
+    ref = part.get("image_url")
+    url = ref.get("url") if isinstance(ref, dict) else ref
+    return url.strip() or None if isinstance(url, str) else None
+
+
+def _materialize_image_for_vision(url: str) -> Optional[str]:
+    """http(s) URLs pass through; a data:image URL is decoded to a file in the image cache
+    (``_persist_data_url_image``), so the path the vision note names stays readable. None if unusable."""
+    lowered = url.lower()
+    if lowered.startswith(("http://", "https://")):
+        return url
+    if lowered.startswith("data:image/"):
+        cached = _persist_data_url_image(url)
+        return cached.path if cached is not None else None
+    return None
+
+
+class _VisionRouter:
+    """Per-request text-mode image routing: each image part becomes the description note of
+    ``_enrich_message_with_vision`` (gateway/run_inbound.py); one URL is described once per request."""
+
+    def __init__(self, gateway_runner: Any = None):
+        from gateway.run_inbound import GatewayInboundMixin
+        # The mixin method reads no instance state, so a non-mixin runner (or None) is safe.
+        owner = gateway_runner if isinstance(gateway_runner, GatewayInboundMixin) else None
+        self._enrich = lambda text, paths: GatewayInboundMixin._enrich_message_with_vision(owner, text, paths)
+        self._notes: dict[str, str] = {}
+
+    async def _note_for(self, url: str) -> str:
+        note = self._notes.get(url)
+        if note is None:
+            path = _materialize_image_for_vision(url)
+            note = (await self._enrich("", [path])) if path else (
+                "[The user sent an image but I couldn't quite see it this time (>_<)]")
+            self._notes[url] = note
+        return note
+
+    async def route(self, content: Any) -> Any:
+        if not isinstance(content, list) or not any(_image_part_url(p) for p in content):
+            return content
+        notes: list[str] = []
+        texts: list[str] = []
+        for part in content:
+            url = _image_part_url(part)
+            if url:
+                notes.append(await self._note_for(url))
+            elif isinstance(part, dict) and str(part.get("type") or "").strip().lower() in _TEXT_PART_TYPES:
+                text = part.get("text")
+                if isinstance(text, str) and text:
+                    texts.append(text)
+            elif isinstance(part, str) and part:
+                texts.append(part)
+        prefix = "\n\n".join(notes)
+        user_text = "\n".join(texts)
+        return f"{prefix}\n\n{user_text}" if user_text else prefix
+
+
+async def apply_vision_routing(
+    user_message: Any, conversation_history: Any, gateway_runner: Any = None,
+) -> tuple[Any, Any]:
+    """Opt-in (``gateway.api_server.image_vision_routing``): in text image mode replace image parts
+    of the user message and history with auxiliary-vision descriptions. Off, native mode, no
+    image, or any failure -> both inputs are returned unchanged (the same objects)."""
+    if not _image_vision_routing_enabled():
+        return user_message, conversation_history
+    history = conversation_history if isinstance(conversation_history, list) else []
+    has_image = any(
+        isinstance(c, list) and any(_image_part_url(p) for p in c)
+        for c in [user_message, *(e.get("content") for e in history if isinstance(e, dict))])
+    if not has_image or _decide_api_server_image_mode() != "text":
+        return user_message, conversation_history
+    try:
+        router = _VisionRouter(gateway_runner)
+        routed_history = conversation_history
+        if history:
+            routed_history = []
+            for entry in history:
+                if isinstance(entry, dict) and isinstance(entry.get("content"), list):
+                    routed = await router.route(entry["content"])
+                    if routed is not entry["content"]:
+                        entry = {**entry, "content": routed}
+                routed_history.append(entry)
+        return await router.route(user_message), routed_history
+    except Exception as exc:
+        logger.warning("api_server vision routing failed, passing content through unchanged: %s", exc)
+        return user_message, conversation_history
+
+
 def _inject_local_path_note(normalized_parts: list[dict[str, Any]], note: str) -> None:
     """Append ``note`` as a text part unless a text part already holds it (a replayed
     conversation_history / previous_response_id turn carries the note of its first pass)."""
@@ -3733,6 +3845,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         already persisted: the transcript's unanswered tail row is adopted from ``conversation_history``
         as THIS turn's user message instead of being appended a second time
         (``agent.session_persistence.adopt_unanswered_turn``; #115325)."""
+        user_message, conversation_history = await apply_vision_routing(
+            user_message, conversation_history, getattr(self, "gateway_runner", None))
         if getattr(self.gateway_runner, "session_authority", None) is not None:
             from gateway.session_api_turn import run_api_turn
             return await run_api_turn(self, user_message=user_message, conversation_history=conversation_history,

@@ -2212,6 +2212,11 @@ DEFAULT_CONFIG = {
             # and add one "saved at" text note with the local path next to the image part, so tools
             # can read the image after the turn. Off by default: every such request writes to disk.
             "persist_data_url_images": False,
+            # In text image mode (agent.image_input_mode / auxiliary.vision, as on the messaging
+            # gateway) replace inline image parts of the request and its history with auxiliary
+            # vision descriptions before the agent runs. Off by default: each new image costs one
+            # vision call per request and a data:image file in the image cache.
+            "image_vision_routing": False,
         },
     },
     # Real-time token streaming to messaging platforms (gateway; restart after enabling). Off by
