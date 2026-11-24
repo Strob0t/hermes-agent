@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, render, screen } from '@testing-library/react'
 import { atom } from 'nanostores'
+import { writeFileSync } from 'node:fs'
 import { createRef } from 'react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -32,6 +33,10 @@ vi.mock('@/hermes', async () => ({
   getHermesConfigSchema: () => getHermesConfigSchema(),
   saveHermesConfig: (config: unknown, profile?: string) => saveHermesConfig(config, profile),
   getElevenLabsVoices: () => getElevenLabsVoices(),
+  // The Memory & Context section renders the memory layers panel and the
+  // profile picker; empty results keep both quiet.
+  getMemoryStatus: async () => ({ active: '', providers: [], builtin_files: { memory: 0, user: 0 } }),
+  getProfiles: async () => ({ profiles: [] }),
   setApiRequestProfile: () => {}
 }))
 
@@ -86,7 +91,7 @@ function renderConfigSettings(activeSectionId = 'safety') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const importInputRef = createRef<HTMLInputElement>()
 
-  render(
+  const { container } = render(
     <MemoryRouter>
       <QueryClientProvider client={client}>
         <ConfigSettings activeSectionId={activeSectionId} importInputRef={importInputRef} />
@@ -94,7 +99,7 @@ function renderConfigSettings(activeSectionId = 'safety') {
     </MemoryRouter>
   )
 
-  return { importInputRef }
+  return { container, importInputRef }
 }
 
 describe('ConfigSettings Memory & Context', () => {
@@ -109,10 +114,21 @@ describe('ConfigSettings Memory & Context', () => {
       }
     })
 
-    renderConfigSettings('memory')
+    const { container } = renderConfigSettings('memory')
 
     expect(await screen.findByRole('switch', { name: 'Relevant Skill Hints' })).toBeTruthy()
-    expect(await screen.findByLabelText('Skill Hint Count')).toBeTruthy()
+    // Number fields render their title as a plain span, not as a <label>.
+    expect(await screen.findByText('Skill Hint Count')).toBeTruthy()
+    const topK = container.querySelector<HTMLInputElement>(
+      '[id="setting-field-skills.retrieval.top_k"] input[type="number"]'
+    )
+    expect(topK?.value).toBe('3')
+
+    const dumpPath = process.env.HERMES_DUMP_DOM
+
+    if (dumpPath) {
+      writeFileSync(dumpPath, container.innerHTML)
+    }
   })
 })
 
