@@ -12,6 +12,9 @@ import logging
 import re
 from typing import Any, Callable, Dict, Optional
 
+from agent.false_stop import (
+    FALSE_STOP_NUDGE, MAX_FALSE_STOP_NUDGES, build_false_stop_nudge, false_stop_detection_enabled,
+)
 from agent.message_metadata import append_message
 from agent.reasoning_promotion import promoted_final_text
 from agent.repetition_guard import STOP_PATH_MIN_CHARS, is_runaway_repetition
@@ -66,6 +69,14 @@ def _is_post_tool_placeholder(agent: Any, text: str, messages: Any) -> bool:
         and any(isinstance(m, dict) and m.get("role") == "tool" for m in (messages or [])[-6:])
         and bool(_POST_TOOL_PLACEHOLDER_RE.match(clean))
         and _post_tool_placeholder_nudge_enabled()
+    )
+
+
+def _false_stop_nudge(agent: Any, text: str, messages: Any) -> bool:
+    """Opt-in (agent.false_stop_detection): text that announces a next action after a tool round."""
+    return bool(
+        build_false_stop_nudge(text, messages, getattr(agent, "_false_stop_nudges", 0))
+        and false_stop_detection_enabled()
     )
 
 
@@ -271,6 +282,8 @@ def finish_text_response(
         )
     ):
         _continuation_kind = "ack"
+    elif _false_stop_nudge(agent, _stall_text, messages):
+        _continuation_kind = "false_stop"
     else:
         _continuation_kind = None
     if _continuation_kind:
@@ -292,7 +305,14 @@ def finish_text_response(
                 "Progress-only reply after tool calls (%r) — nudging model to continue (%d/2)",
                 _stall_text.strip()[:80], codex_ack_continuations + 1,
             )
-        codex_ack_continuations += 1
+        if _continuation_kind == "false_stop":
+            agent._false_stop_nudges = getattr(agent, "_false_stop_nudges", 0) + 1
+            logger.info(
+                "False stop after a tool round (%r) — nudging model to make the call (%d/%d)",
+                _stall_text.strip()[:80], agent._false_stop_nudges, MAX_FALSE_STOP_NUDGES,
+            )
+        else:
+            codex_ack_continuations += 1
         interim_msg = agent._build_assistant_message(assistant_message, "incomplete")
         if _promoted:
             # Same sidecar as the final row: the wire copy must carry the promoted text, not only
@@ -305,6 +325,7 @@ def finish_text_response(
             "content": (
                 _DEGENERATE_FINAL_NUDGE if _continuation_kind == "degenerate"
                 else _POST_TOOL_PLACEHOLDER_NUDGE if _continuation_kind == "placeholder"
+                else FALSE_STOP_NUDGE if _continuation_kind == "false_stop"
                 else _CODEX_ACK_CONTINUATION_NUDGE
             ),
         })
@@ -315,6 +336,7 @@ def finish_text_response(
         return _verdict("continue")
 
     codex_ack_continuations = 0
+    agent._false_stop_nudges = 0
 
     final_response, _joined = _absorb_continuation_fragments(final_response, truncated_response_parts, messages)
     if _joined:

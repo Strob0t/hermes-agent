@@ -177,6 +177,10 @@ DEFAULT_CONFIG = {
         # "on it", "正在处理") gets one "finish the task" nudge per turn, under the same max-2
         # continuation counter as the stall/ack guards. Bare "ok" never matches. False = off.
         "post_tool_placeholder_nudge": False,
+        # Opt-in: after a tool round, a stop on text that announces the next action ("Next I will
+        # run the tests:", "接下来看日志。") gets a "make the tool call now" nudge, max 2 per tool
+        # round. "off" (default) | "on" | "auto" (on except on messaging surfaces).
+        "false_stop_detection": "off",
         # "Finish the job" prompt block for all models: don't stop at a stub, never fabricate output
         # when the real path is blocked. ~80 cached tokens. False disables.
         "task_completion_guidance": True,
