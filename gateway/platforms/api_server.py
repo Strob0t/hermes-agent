@@ -7,6 +7,7 @@ OpenAI-compatible frontend connects at http://localhost:8642/v1 with API_SERVER_
 """
 
 import asyncio
+import base64
 import errno
 import hashlib
 import itertools
@@ -117,8 +118,8 @@ from gateway.platforms.api_server_openai_routes import OpenAICompatRoutesMixin
 from gateway.platforms.api_server_memory_sessions import ApiServerMemorySessions
 from gateway.platforms.api_server_bot_chat import reset_local_title_owner
 from gateway.platforms.base import (
-    MEDIA_TAG_CLEANUP_RE, BasePlatformAdapter, SendResult, _terminal_sentinel_start, is_network_accessible,
-    validate_media_delivery_path)
+    MEDIA_TAG_CLEANUP_RE, BasePlatformAdapter, CachedMedia, SendResult, _terminal_sentinel_start,
+    cache_media_bytes, get_image_cache_dir, is_network_accessible, validate_media_delivery_path)
 from gateway.platforms.api_server_run_idempotency import RunIdempotencyStore
 from gateway.platforms.api_server_response_store import ResponseStore
 from agent.i18n import t
@@ -469,6 +470,51 @@ def _normalize_image_part(part: dict[str, Any]) -> dict[str, Any]:
     return image_part
 
 
+def _persist_data_url_images_enabled() -> bool:
+    """gateway.api_server.persist_data_url_images (default off; unreadable config -> off)."""
+    try:
+        from hermes_cli.config import cfg_get, load_config
+        return cfg_get(load_config(), "gateway", "api_server", "persist_data_url_images", default=False) is True
+    except Exception:
+        return False
+
+
+def _persist_data_url_image(url_value: str) -> Optional[CachedMedia]:
+    """Save the bytes of a ``data:image/...;base64,...`` URL in the image cache as
+    ``api_inbound_<sha256[:16]><ext>``; the same bytes always map to one file, so a replayed
+    request adds no file. None (never raises) when the payload is no valid image."""
+    header, _, payload = url_value.partition(",")
+    if ";base64" not in header.lower():
+        return None
+    try:
+        raw = base64.b64decode(payload, validate=True)
+        cached = cache_media_bytes(
+            raw, mime_type=header[len("data:"):].split(";", 1)[0].strip().lower(), default_kind="image")
+        if cached is None or cached.kind != "image":
+            if cached is not None:
+                Path(cached.path).unlink(missing_ok=True)
+            return None
+        stable = get_image_cache_dir() / (
+            f"api_inbound_{hashlib.sha256(raw).hexdigest()[:16]}{Path(cached.path).suffix or '.jpg'}")
+        if stable.exists():
+            Path(cached.path).unlink(missing_ok=True)
+        else:
+            os.replace(cached.path, stable)
+    except Exception:
+        logger.debug("api_server: data-URL image not persisted", exc_info=True)
+        return None
+    return CachedMedia(str(stable), cached.media_type, cached.kind, cached.display_name)
+
+
+def _inject_local_path_note(normalized_parts: list[dict[str, Any]], note: str) -> None:
+    """Append ``note`` as a text part unless a text part already holds it (a replayed
+    conversation_history / previous_response_id turn carries the note of its first pass)."""
+    for part in normalized_parts:
+        if part.get("type") == "text" and note in (part.get("text") or ""):
+            return
+    normalized_parts.append({"type": "text", "text": note})
+
+
 def _normalize_multimodal_content(content: Any) -> Any:
     """Validate multimodal content: a plain string when text-only, else canonical ``text`` /
     ``image_url`` parts (native OpenAI vision shape; Anthropic conversion happens downstream).
@@ -497,7 +543,13 @@ def _normalize_multimodal_content(content: Any) -> Any:
             if text is not None and str(text):
                 normalized_parts.append({"type": "text", "text": _cap_text(str(text))})
         elif part_type in _IMAGE_PART_TYPES:
-            normalized_parts.append(_normalize_image_part(part))
+            image_part = _normalize_image_part(part)
+            url_value = image_part["image_url"]["url"]
+            if url_value[:5].lower() == "data:" and _persist_data_url_images_enabled():
+                cached_image = _persist_data_url_image(url_value)
+                if cached_image is not None:
+                    _inject_local_path_note(normalized_parts, cached_image.context_note())
+            normalized_parts.append(image_part)
         elif part_type in _FILE_PART_TYPES:
             raise ValueError(
                 "unsupported_content_type:Inline image inputs are supported, "
