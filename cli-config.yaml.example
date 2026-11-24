@@ -661,10 +661,16 @@ tool_loop_guardrails:
     exact_failure: 2
     same_tool_failure: 3
     idempotent_no_progress: 2
+    repeated_result: 3         # identical result N times in a row, any tool/args
   hard_stop_after:
     exact_failure: 5
     same_tool_failure: 8
     idempotent_no_progress: 5
+    repeated_result: 5
+  repeated_result_min_chars: 200   # shorter results are not counted
+  # process_manage and these terminal commands (job pollers) are never counted.
+  repeated_result_exempt_command_patterns:
+    - '\boh-task\.py\s+(status|wait|list)\b'
 
 # =============================================================================
 # Context Compression (Auto-shrinks long conversations)

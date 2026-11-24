@@ -2295,10 +2295,15 @@ tool_loop_guardrails:
     exact_failure: 2           # identical failing call repeated N times
     same_tool_failure: 3       # same tool failing N times (different args)
     idempotent_no_progress: 2  # same result, no progress, N times
+    repeated_result: 3         # identical result N times in a row, any tool or args
   hard_stop_after:
     exact_failure: 5
     same_tool_failure: 8
     idempotent_no_progress: 5
+    repeated_result: 5
+  repeated_result_min_chars: 200   # shorter results are not counted (except empty-success envelopes)
+  repeated_result_exempt_command_patterns:  # terminal pollers never counted; process_manage is always exempt
+    - '\boh-task\.py\s+(status|wait|list)\b'
   loop_caps:
     max_web_searches: 50       # max web_search calls per turn (0 = unlimited)
     max_subagents: 50          # max subagents spawned per turn (0 = unlimited)

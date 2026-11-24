@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import deque
 from dataclasses import asdict, dataclass, field, fields
 from typing import Any, Mapping
@@ -66,7 +67,16 @@ _THRESHOLD_SOURCES: dict[str, tuple[str, str]] = {
     "exact_failure_block_after": ("hard_stop_after", "exact_failure"),
     "same_tool_failure_halt_after": ("hard_stop_after", "same_tool_failure"),
     "no_progress_block_after": ("hard_stop_after", "idempotent_no_progress"),
+    "repeated_result_warn_after": ("warn_after", "repeated_result"),
+    "repeated_result_halt_after": ("hard_stop_after", "repeated_result"),
 }
+
+# Consecutive identical results are a loop signal whatever the tool, args or failure status
+# (varied web fetches that all return the same blocked/404 body). Short results ("[]", "OK")
+# are ignored, except empty-success envelopes from non-mutating tools. Pollers are exempt:
+# an unchanged status is progress while a job runs.
+_DEFAULT_REPEATED_RESULT_EXEMPT_COMMAND_PATTERNS = (r"\boh-task\.py\s+(status|wait|list)\b",)
+_EMPTY_PAYLOAD_KEYS = ("results", "items", "matches", "entries", "sessions", "data")
 
 # Per-turn caps on runaway-prone tools (counters reset in reset_for_turn).
 _DEFAULT_MAX_WEB_SEARCHES_PER_TURN = 50
@@ -119,6 +129,10 @@ class ToolCallGuardrailConfig:
     same_tool_failure_halt_after: int = 8
     no_progress_warn_after: int = 2
     no_progress_block_after: int = 5
+    repeated_result_warn_after: int = 3
+    repeated_result_halt_after: int = 5
+    repeated_result_min_chars: int = 200
+    repeated_result_exempt_command_patterns: tuple[str, ...] = _DEFAULT_REPEATED_RESULT_EXEMPT_COMMAND_PATTERNS
     idempotent_tools: frozenset[str] = field(default_factory=lambda: IDEMPOTENT_TOOL_NAMES)
     loop_caps: LoopCapConfig = field(default_factory=LoopCapConfig)
 
@@ -140,7 +154,17 @@ class ToolCallGuardrailConfig:
             return _int_at_least(nested, getattr(d, name), 1)
 
         thresholds = {name: threshold(name, *src) for name, src in _THRESHOLD_SOURCES.items()}
-        return cls(loop_caps=LoopCapConfig.from_mapping(data.get("loop_caps")), **flags, **thresholds)
+        patterns = data.get("repeated_result_exempt_command_patterns")
+        if isinstance(patterns, (list, tuple)):
+            patterns = tuple(str(p) for p in patterns if isinstance(p, str) and p)
+        else:
+            patterns = d.repeated_result_exempt_command_patterns
+        return cls(
+            loop_caps=LoopCapConfig.from_mapping(data.get("loop_caps")),
+            repeated_result_min_chars=_int_at_least(data.get("repeated_result_min_chars"), d.repeated_result_min_chars, 1),
+            repeated_result_exempt_command_patterns=patterns,
+            **flags, **thresholds,
+        )
 
 
 @dataclass(frozen=True)
@@ -268,6 +292,16 @@ _DECISION_MESSAGES: dict[str, str] = {
         "arguments and identical results has run {count} times. Repeating the batch unchanged is not "
         "progress; use the results already provided or change strategy."
     ),
+    "repeated_result_halt": (
+        "Stopped: the last {count} tool calls returned the same result even though the calls changed. "
+        "You are looping without making progress (the data source is unavailable or blocking). Stop retrying "
+        "variations; report what you already have and the blocker, or ask how to proceed."
+    ),
+    "repeated_result_warning": (
+        "The last {count} tool calls returned an identical result. This is a no-progress loop; the target "
+        "likely is not reachable. Use what you have or report the blocker instead of trying more variations "
+        "of the same approach."
+    ),
     "loop_web_search_cap": (
         "Blocked web_search: this turn has already made {cap} web searches, the per-turn limit. "
         "This looks like a runaway search loop. Work with the results you already have and give the user your answer."
@@ -312,6 +346,8 @@ class ToolCallGuardrailController:
         # signature -> a mutating call succeeded since its last failure
         self._progress_since_failure: dict[ToolCallSignature, bool] = {}
         self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
+        self._last_result_hash: str | None = None
+        self._result_streak = 0
         self._halt_decision: ToolGuardrailDecision | None = None
         # Identical-call streak: CONSECUTIVE identical (tool, args, result) calls; any different call or
         # result resets it, so re-reads after edits and varied polling are never flagged.
@@ -368,7 +404,7 @@ class ToolCallGuardrailController:
         return allow
 
     def after_call(
-        self, tool_name: str, args: Mapping[str, Any] | None, result: str | None,
+        self, tool_name: str, args: Mapping[str, Any] | None, result: str | Mapping[str, Any] | None,
         *, failed: bool | None = None,
     ) -> ToolGuardrailDecision:
         args = _coerce_args(args)
@@ -376,6 +412,11 @@ class ToolCallGuardrailController:
         if failed is None:
             failed, _ = classify_tool_failure(tool_name, result)
         warnings = self.config.warnings_enabled
+
+        # Keyed on result content only, so it runs before the failure/signature detectors below.
+        repeat = self._track_result_repetition(tool_name, args, result, signature)
+        if repeat is not None and repeat.should_halt:
+            return repeat
 
         if failed:
             # An identical failing call is only a REPLAY if nothing landed in between;
@@ -413,7 +454,7 @@ class ToolCallGuardrailController:
                     "warn", "same_tool_failure_warning", tool_name, same_count, signature,
                     message=_tool_failure_recovery_hint(tool_name, same_count),
                 )
-            return ToolGuardrailDecision(tool_name=tool_name, count=exact_count, signature=signature)
+            return repeat or ToolGuardrailDecision(tool_name=tool_name, count=exact_count, signature=signature)
 
         self._exact_failure_counts.pop(signature, None)
         self._same_tool_failure_counts.pop(tool_name, None)
@@ -424,7 +465,7 @@ class ToolCallGuardrailController:
             self._same_tool_failure_counts.clear()
         if not self._is_idempotent(tool_name):
             self._no_progress.pop(signature, None)
-            return ToolGuardrailDecision(tool_name=tool_name, signature=signature)
+            return repeat or ToolGuardrailDecision(tool_name=tool_name, signature=signature)
 
         result_hash = _result_hash(result, tool_name)
         previous = self._no_progress.get(signature)
@@ -432,7 +473,46 @@ class ToolCallGuardrailController:
         self._no_progress[signature] = (result_hash, repeat_count)
         if warnings and repeat_count >= self.config.no_progress_warn_after:
             return self._decide("warn", "idempotent_no_progress_warning", tool_name, repeat_count, signature)
-        return ToolGuardrailDecision(tool_name=tool_name, count=repeat_count, signature=signature)
+        return repeat or ToolGuardrailDecision(tool_name=tool_name, count=repeat_count, signature=signature)
+
+    def _track_result_repetition(
+        self, tool_name: str, args: Mapping[str, Any], result: str | Mapping[str, Any] | None,
+        signature: ToolCallSignature,
+    ) -> ToolGuardrailDecision | None:
+        """Count consecutive identical results across tools/args; any other or untracked result resets the streak."""
+        text = _repetition_text(result) if result else ""
+        tracked = bool(text) and not self._is_repetition_exempt(tool_name, args) and (
+            len(text) >= self.config.repeated_result_min_chars
+            or (tool_name not in PROGRESS_RESET_TOOL_NAMES and _is_empty_success_envelope(result))
+        )
+        if not tracked:
+            self._last_result_hash, self._result_streak = None, 0
+            return None
+        result_hash = _result_hash(text, tool_name)
+        self._result_streak = self._result_streak + 1 if result_hash == self._last_result_hash else 1
+        self._last_result_hash = result_hash
+        count = self._result_streak
+        if self.config.hard_stop_enabled and count >= self.config.repeated_result_halt_after:
+            return self._decide("halt", "repeated_result_halt", tool_name, count, signature)
+        if self.config.warnings_enabled and count >= self.config.repeated_result_warn_after:
+            return self._decide("warn", "repeated_result_warning", tool_name, count, signature)
+        return None
+
+    def _is_repetition_exempt(self, tool_name: str, args: Mapping[str, Any]) -> bool:
+        if is_stall_guard_repeatable(tool_name):
+            return True
+        if tool_name != "terminal":
+            return False
+        command = args.get("command")
+        if not isinstance(command, str):
+            return False
+        for pattern in self.config.repeated_result_exempt_command_patterns:
+            try:
+                if re.search(pattern, command):
+                    return True
+            except re.error:
+                continue
+        return False
 
     def _is_idempotent(self, tool_name: str) -> bool:
         return tool_name in self.config.idempotent_tools
@@ -568,12 +648,19 @@ def toolguard_synthetic_result(decision: ToolGuardrailDecision) -> str:
     return json.dumps({"error": decision.message, "guardrail": decision.to_metadata()}, ensure_ascii=False)
 
 
-def append_toolguard_guidance(result: str, decision: ToolGuardrailDecision) -> str:
-    """Append runtime guidance to the current tool result content."""
+def append_toolguard_guidance(result: Any, decision: ToolGuardrailDecision) -> Any:
+    """Append runtime guidance to the tool result; multimodal dicts keep their shape (guidance is a trailing text part)."""
     if decision.action not in {"warn", "halt"} or not decision.message:
         return result
     label = "Tool loop hard stop" if decision.action == "halt" else "Tool loop warning"
-    return (result or "") + f"\n\n[{label}: {decision.code}; count={decision.count}; {decision.message}]"
+    guidance = f"[{label}: {decision.code}; count={decision.count}; {decision.message}]"
+    if isinstance(result, Mapping) and result.get("_multimodal"):
+        updated = dict(result)
+        updated["content"] = list(updated.get("content") or []) + [{"type": "text", "text": guidance}]
+        if updated.get("text_summary"):
+            updated["text_summary"] = f"{updated['text_summary']}\n\n{guidance}"
+        return updated
+    return (result or "") + f"\n\n{guidance}"
 
 
 def _tool_failure_recovery_hint(tool_name: str, count: int) -> str:
@@ -617,6 +704,41 @@ def _without_execute_code_metadata(parsed: Any) -> Any:
     if isinstance(kernel, dict):
         cleaned["kernel"] = {k: v for k, v in kernel.items() if k != "execution_count"}
     return cleaned
+
+
+def _repetition_text(result: Any) -> str:
+    """Text of a result for repetition tracking; multimodal media parts become short digests (base64 differs per image)."""
+    if isinstance(result, Mapping) and result.get("_multimodal"):
+        parts: list[str] = []
+        for part in result.get("content") or []:
+            if not isinstance(part, Mapping):
+                parts.append(str(part))
+            elif part.get("type") == "text":
+                parts.append(str(part.get("text") or ""))
+            else:
+                payload = part.get("image_url")
+                if isinstance(payload, Mapping):
+                    payload = payload.get("url")
+                parts.append(f"[media:{_sha256(str(payload or ''))[:16]}]")
+        return "\n".join(parts)
+    return result if isinstance(result, str) else str(result)
+
+
+def _is_empty_success_envelope(result: Any) -> bool:
+    """True for ``{"success": true, ...}`` with ``count == 0`` or an empty payload list and no non-empty payload."""
+    if not isinstance(result, str):
+        return False
+    parsed = safe_json_loads(result)
+    if not isinstance(parsed, Mapping) or parsed.get("success") is not True:
+        return False
+    empty = parsed.get("count") == 0
+    for key in _EMPTY_PAYLOAD_KEYS:
+        if key not in parsed:
+            continue
+        if parsed[key] not in (None, [], {}, ""):
+            return False
+        empty = True
+    return empty
 
 
 def _result_hash(result: str | None, tool_name: str = "") -> str:
