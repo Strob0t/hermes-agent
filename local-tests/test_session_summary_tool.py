@@ -27,6 +27,9 @@ class SessionSummaryToolTest(unittest.TestCase):
         env.start()
         self.addCleanup(env.stop)
         os.environ.pop("HERMES_SESSION_ID", None)
+        # An AIAgent built by an earlier test binds the session ContextVar process-wide.
+        from gateway.session_context import reset_session_vars
+        reset_session_vars()
         self.addCleanup(self._tmp.cleanup)
 
     def _dispatch(self, args, session_id="sess-1"):
