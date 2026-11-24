@@ -220,12 +220,19 @@ class FileBackend:
     @staticmethod
     def write_path(path: Path, changes: Changes) -> None:
         from utils import atomic_roundtrip_yaml_save, atomic_roundtrip_yaml_update
+        from utils.files import atomic_roundtrip_yaml_updates
         if changes.document is not None:
             atomic_roundtrip_yaml_save(path, changes.document, extra_content_on_create=changes.extra_content_on_create)
-        for key, value in changes.set.items():
+        # One locked load-mutate-dump for the grouped set/unset: per-key replaces let a concurrent
+        # writer interleave and lose a key (#147939). A single key keeps the
+        # atomic_roundtrip_yaml_update seam that tests patch.
+        updates = dict(changes.set)
+        updates.update({k: None for k in changes.unset})
+        if len(updates) == 1:
+            key, value = next(iter(updates.items()))
             atomic_roundtrip_yaml_update(path, key, value)
-        for key in changes.unset:
-            atomic_roundtrip_yaml_update(path, key, None)
+        elif updates:
+            atomic_roundtrip_yaml_updates(path, updates)
         drop_other_access(path)
 
     def config_path(self, home: Path) -> Path:
