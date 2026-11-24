@@ -506,6 +506,25 @@ def get_process_start_time(pid: int) -> Optional[int]:
     return _get_process_start_time(pid)
 
 
+_gateway_runtime_nonce = os.urandom(16).hex()
+_gateway_execution_identity_lock = threading.Lock()
+_gateway_execution_identity_cache: Optional[tuple[int, str]] = None
+
+
+def get_gateway_execution_receipt_identity() -> tuple[int, str]:
+    """``(pid, "gateway:<pid>:<start_time|nonce>")`` of this process generation, frozen once per
+    pid (a forked child gets its own). Used only by opt-in turn execution receipts."""
+    global _gateway_execution_identity_cache
+    pid = os.getpid()
+    with _gateway_execution_identity_lock:
+        cached = _gateway_execution_identity_cache
+        if cached is None or cached[0] != pid:
+            start_time = _get_process_start_time(pid)
+            generation = str(start_time) if start_time is not None else _gateway_runtime_nonce
+            cached = _gateway_execution_identity_cache = (pid, f"gateway:{pid}:{generation}")
+        return cached
+
+
 def _read_process_cmdline(pid: int) -> Optional[str]:
     """Process command line as one string: /proc, then psutil, then ``ps``.
 
