@@ -24,17 +24,20 @@ def inherit_creator_origin(
 
 def initial_task_state(
     conn: sqlite3.Connection, parents: tuple[str, ...], initial_status: str,
-    triage: bool, tenant: Optional[str],
+    triage: bool, tenant: Optional[str], *,
+    required_parent_results: Optional[dict[str, str]] = None,
 ) -> tuple[str, Optional[str]]:
     """Resolve state and tenant under the creator's write transaction.
 
     Parent order breaks ties in this soft namespace; explicit tenant wins.
-    Validate parents even for parked tasks so links never dangle.
+    Validate parents even for parked tasks so links never dangle. A parent in
+    ``required_parent_results`` must be ``done`` with exactly that result.
     """
+    required = required_parent_results or {}
     rows = {}
     if parents:
         rows = {row["id"]: row for row in conn.execute(
-            "SELECT id, status, tenant FROM tasks WHERE id IN "
+            "SELECT id, status, tenant, result FROM tasks WHERE id IN "
             "(" + ",".join("?" * len(parents)) + ")", parents,
         )}
         missing = [pid for pid in parents if pid not in rows]
@@ -46,7 +49,11 @@ def initial_task_state(
         return "blocked", tenant
     if triage:
         return "triage", tenant
-    if any(row["status"] != "done" for row in rows.values()):
+    if any(
+        row["status"] != "done"
+        or (pid in required and row["result"] != required[pid])
+        for pid, row in rows.items()
+    ):
         return "todo", tenant
     return "ready", tenant
 
