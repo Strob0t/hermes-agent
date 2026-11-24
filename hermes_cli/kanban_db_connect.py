@@ -960,6 +960,15 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     # Same ordering rule as the ``tasks`` indexes above: index after column.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_events_run ON task_events(run_id, id)")
 
+    # Result-gated dependency edges are opt-in: existing links get NULL and
+    # keep their done/archived terminal-status gate.
+    if _table_exists(conn, "task_links") and (
+        "required_parent_result" not in _column_names(conn, "task_links")
+    ):
+        _add_column_if_missing(
+            conn, "task_links", "required_parent_result", "required_parent_result TEXT",
+        )
+
     if _table_exists(conn, "kanban_notify_subs"):
         notify_cols = _column_names(conn, "kanban_notify_subs")
         for name, ddl in _NOTIFY_SUB_COLUMNS:

@@ -166,6 +166,10 @@ _SPECS = [
                   "Mutually exclusive with --body."),
         _arg("--assignee", help="Profile name to assign"),
         _arg("--parent", action="append", default=[], help="Parent task id (repeatable)"),
+        _arg("--require-parent-result", action="append", default=[],
+             dest="required_parent_results", metavar="PARENT=RESULT",
+             help="Require a --parent to be done with this exact machine-readable "
+                  "result (repeatable), e.g. --require-parent-result t_qa=ready_to_deploy"),
         _arg("--workspace",
              help="scratch | worktree | worktree:<path> | dir:<path> (default: scratch; "
                   "an explicit 'scratch' also opts out of a project-scoped board's project)"),
@@ -271,7 +275,12 @@ _SPECS = [
         _arg("--task", help="Only show diagnostics for one task id"),
         _json_flag(help="Emit JSON (structured) instead of the default human table"),
     ], aliases=["diag"], help="List active diagnostics on the current board"),
-    _cmd("link", [_arg("parent_id"), _arg("child_id")], help="Add a parent->child dependency"),
+    _cmd("link", [
+        _arg("parent_id"), _arg("child_id"),
+        _arg("--required-parent-result",
+             help="Require the parent to be done with this exact machine-readable "
+                  "result before releasing the child"),
+    ], help="Add a parent->child dependency"),
     _cmd("unlink", [_arg("parent_id"), _arg("child_id")], help="Remove a parent->child dependency"),
     _cmd("claim", [
         _TASK_ID,

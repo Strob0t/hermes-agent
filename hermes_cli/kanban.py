@@ -14,7 +14,7 @@ import shlex
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Iterable, Optional
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
@@ -332,6 +332,18 @@ def _cmd_assignees(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_required_parent_results(values: Iterable[str]) -> dict[str, str]:
+    """Parse repeatable ``PARENT=RESULT`` CLI values into an edge map."""
+    parsed: dict[str, str] = {}
+    for raw_value in values:
+        parent_id, separator, required_result = str(raw_value).partition("=")
+        parent_id, required_result = parent_id.strip(), required_result.strip()
+        if not separator or not parent_id or not required_result:
+            raise ValueError(f"expected PARENT=RESULT, got {raw_value!r}")
+        parsed[parent_id] = required_result
+    return parsed
+
+
 def _cmd_create(args: argparse.Namespace) -> int:
     from agent.delegation_context import is_dispatcher_owned_worker_context
 
@@ -360,13 +372,19 @@ def _cmd_create(args: argparse.Namespace) -> int:
     if max_retries is not None and max_retries < 1:
         return _err(f"kanban: --max-retries must be >= 1 (got {max_retries}); "
                     "use 1 to trip on the first failure.", 2)
+    try:
+        required_parent_results = _parse_required_parent_results(
+            getattr(args, "required_parent_results", None) or [])
+    except ValueError as exc:
+        return _err(f"kanban: --require-parent-result: {exc}", 2)
     with kbc.connect_closing() as conn:
         task_id = kb.create_task(
             conn, title=args.title, body=body, assignee=args.assignee,
             created_by=args.created_by or _profile_author(),
             workspace_kind=ws_kind, workspace_path=ws_path, branch_name=branch_name,
             project_id=getattr(args, "project", None), tenant=args.tenant, priority=args.priority,
-            parents=tuple(args.parent or ()), triage=bool(getattr(args, "triage", False)),
+            parents=tuple(args.parent or ()), required_parent_results=required_parent_results,
+            triage=bool(getattr(args, "triage", False)),
             idempotency_key=getattr(args, "idempotency_key", None),
             max_runtime_seconds=max_runtime, skills=getattr(args, "skills", None) or None,
             max_retries=max_retries, model_override=getattr(args, "model_override", None),
@@ -711,8 +729,9 @@ def _cmd_link(args: argparse.Namespace) -> int:
         _worker_run_id_for(args.child_id)
         if args.child_id == os.environ.get("HERMES_KANBAN_TASK") else None)
     with kbc.connect_closing() as conn:
-        gated = kb.link_tasks(conn, args.parent_id, args.child_id,
-                              expected_child_run_id=expected_child_run_id)
+        gated = kb.link_tasks(
+            conn, args.parent_id, args.child_id, expected_child_run_id=expected_child_run_id,
+            required_parent_result=getattr(args, "required_parent_result", None))
     print(f"Linked {args.parent_id} -> {args.child_id}")
     if gated:
         print(
