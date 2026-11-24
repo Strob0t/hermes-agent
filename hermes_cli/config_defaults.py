@@ -2208,6 +2208,10 @@ DEFAULT_CONFIG = {
             # response_store.db write several hundred KB. 0 = store tool outputs verbatim
             # (default: the capped text is what the model is replayed on the next turn).
             "history_tool_output_max_chars": 0,
+            # Save each inbound data:image base64 URL in the image cache under a stable sha256 name
+            # and add one "saved at" text note with the local path next to the image part, so tools
+            # can read the image after the turn. Off by default: every such request writes to disk.
+            "persist_data_url_images": False,
         },
     },
     # Real-time token streaming to messaging platforms (gateway; restart after enabling). Off by

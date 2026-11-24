@@ -849,6 +849,7 @@ gateway:
     model_name: my-hermes
     max_concurrent_runs: 10   # concurrent-run cap; 0 disables the limit
     history_tool_output_max_chars: 0   # cap tool outputs in stored /v1/responses history; 0 = verbatim
+    persist_data_url_images: false   # save inbound data:image URLs to the image cache
 ```
 
 `port`, `key`, `host`, `cors_origins`, and `model_name` are automatically bridged into the platform's `extra` settings, so they behave exactly like their `API_SERVER_*` environment-variable counterparts. Environment variables take precedence over `config.yaml` values. The block is also accepted under `gateway.platforms.api_server:` or a top-level `platforms.api_server:` section.
@@ -860,6 +861,10 @@ The API server limits how many agent runs may execute at once across the endpoin
 ### Stored history size for `previous_response_id` chaining
 
 Each stored `/v1/responses` snapshot embeds the full cumulative conversation history (that is what `previous_response_id` and `conversation` chaining replay), including every tool output verbatim. A conversation with a few large tool outputs can therefore make a single `response_store.db` write several hundred KB. Set `gateway.api_server.history_tool_output_max_chars` (default **0** = store verbatim) to cap each tool output and each string tool-call argument in the **stored** history at that many characters; anything longer is cut to the head plus a `...[N more chars]` marker. User and assistant text is never touched, and the `response.completed` payload and incremental SSE events are unaffected. Because the stored history is what the model sees on the next chained turn, enabling the cap also trims what the model is replayed — leave it at 0 if your workflow needs complete tool outputs across turns.
+
+### Persisting inline data-URL images
+
+By default an inline `data:image/...;base64,...` image part is only forwarded to the model. Set `gateway.api_server.persist_data_url_images: true` (default **false**) to also save the decoded bytes in the gateway image cache as `api_inbound_<sha256>.<ext>` and add one text part `[image '<name>' saved at: <path>]` next to the image part, so tools can re-read the image after the turn. The image part itself is unchanged. The file name comes from the bytes, so a replayed turn (`conversation_history`, `previous_response_id`) writes no second file and adds no second note. Each new image costs disk space in the image cache until the normal cache cleanup removes it; payloads that are not valid images are not saved. Remote `http(s)` image URLs are never downloaded.
 
 ## Security Headers
 
