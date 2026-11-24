@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -799,7 +799,7 @@ class TestToolHandler:
 
     def _patch_mcp_loop(self, coro_side_effect=None):
         """Return a patch for _run_on_mcp_loop that runs the coroutine directly."""
-        def fake_run(coro_or_factory, timeout=30):
+        def fake_run(coro_or_factory, timeout=30, **_kwargs):
             coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
             return asyncio.run(coro)
         if coro_side_effect:
@@ -822,7 +822,7 @@ class TestToolHandler:
             with self._patch_mcp_loop(), patch.dict(_server_trust_levels, {"test_srv": "full"}):
                 result = json.loads(handler({"name": "world"}))
             assert result["result"] == "hello world"
-            mock_session.call_tool.assert_called_once_with("greet", arguments={"name": "world"})
+            mock_session.call_tool.assert_called_once_with("greet", arguments={"name": "world"}, progress_callback=ANY)
         finally:
             _servers.pop("test_srv", None)
 
@@ -854,7 +854,7 @@ class TestToolHandler:
                 result = json.loads(handler({"name": "world"}))
             assert result["result"] == "reconnected"
             reconnect.assert_called_once()
-            mock_session.call_tool.assert_called_once_with("greet", arguments={"name": "world"})
+            mock_session.call_tool.assert_called_once_with("greet", arguments={"name": "world"}, progress_callback=ANY)
         finally:
             _servers.pop("test_srv", None)
 
@@ -1815,7 +1815,7 @@ class TestUtilityHandlers:
 
     def _patch_mcp_loop(self):
         """Return a patch for _run_on_mcp_loop that runs the coroutine directly."""
-        def fake_run(coro_or_factory, timeout=30):
+        def fake_run(coro_or_factory, timeout=30, **_kwargs):
             coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
             return asyncio.run(coro)
         return patch("tools.mcp_tool_loop._run_on_mcp_loop", side_effect=fake_run)
