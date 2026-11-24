@@ -97,6 +97,25 @@ function renderConfigSettings(activeSectionId = 'safety') {
   return { importInputRef }
 }
 
+describe('ConfigSettings Memory & Context', () => {
+  it('shows both opt-in skills.retrieval fields in the Memory & Context section', async () => {
+    getHermesConfigRecord.mockResolvedValue({
+      skills: { retrieval: { enabled: false, top_k: 3 } }
+    })
+    getHermesConfigSchema.mockResolvedValue({
+      fields: {
+        'skills.retrieval.enabled': { type: 'boolean' },
+        'skills.retrieval.top_k': { type: 'number' }
+      }
+    })
+
+    renderConfigSettings('memory')
+
+    expect(await screen.findByRole('switch', { name: 'Relevant Skill Hints' })).toBeTruthy()
+    expect(await screen.findByLabelText('Skill Hint Count')).toBeTruthy()
+  })
+})
+
 describe('ConfigSettings autosave', () => {
   it('sends a later revert instead of diffing it away against the stale page-load baseline', async () => {
     getHermesConfigRecord.mockResolvedValue({ checkpoints: { enabled: false }, other: 'untouched' })

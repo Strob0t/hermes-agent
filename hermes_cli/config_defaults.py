@@ -1419,6 +1419,16 @@ DEFAULT_CONFIG = {
         "project_discovery": True,
         # Trusted project roots; managed by `hermes skills trust` / `untrust`.
         "trusted_project_dirs": [],
+        # Opt-in per-turn BM25 skill retrieval: the top-k skills for the current user message are
+        # appended to the user message's api_content only (never the stored message, never the
+        # system prompt). false = off, no added tokens. Read ONCE at agent init. Env fallback
+        # only when the key is absent (config wins): HERMES_SKILL_RETRIEVAL=on|off and
+        # HERMES_SKILL_RETRIEVAL_TOP_K.
+        "retrieval": {
+            "enabled": False,
+            # Skill names in the per-turn hint, clamped to 1..5.
+            "top_k": 3,
+        },
         # Skill names pinned as fully loaded in every new session (CLI, TUI, gateway, cron, API).
         # Resolved once when the agent's prompt is first built; missing/disabled names warn and
         # skip; HERMES_IGNORE_RULES suppresses the list like the other auto-injected context.

@@ -765,6 +765,11 @@ def _record_success(action, name, result, *, file_path, absorbed_into, task_id,
     with suppress(Exception):
         from agent.prompt_builder import clear_skills_system_prompt_cache
         clear_skills_system_prompt_cache(clear_snapshot=True)
+    # Opt-in skill-retrieval corpus: create/patch/delete (and supporting-file edits) must
+    # re-rank from the new frontmatter on the next turn. Never blocks skill management.
+    with suppress(Exception):
+        from agent.skill_retrieval import invalidate_retrieval_index
+        invalidate_retrieval_index()
     # Curator telemetry: only the background review fork marks a skill agent-created
     # (foreground creates belong to the user). A recoverable curator archive keeps its
     # record as STATE_ARCHIVED (`hermes curator status`/`restore`); only a hard delete forgets.

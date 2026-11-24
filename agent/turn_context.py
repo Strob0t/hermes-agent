@@ -986,6 +986,35 @@ def _collect_pre_llm_call_context(
     return ""
 
 
+def _skills_retrieval_hint(agent: Any, user_message: Any) -> str:
+    """Short opt-in hint: the top-k BM25 skills for this turn's user message.
+
+    Rides the user-message injection channel ( => ``api_content`` sidecar only): never the
+    stored message, never the system prompt, so the skill index there stays byte-identical
+    and the prompt cache prefix is stable. Settings were snapshotted at agent init
+    (``agent._skills_retrieval_enabled`` / ``_top_k``); no config read happens here."""
+    if not getattr(agent, "_skills_retrieval_enabled", False):
+        return ""
+    if not isinstance(user_message, str) or not user_message.strip():
+        return ""
+    top_k = getattr(agent, "_skills_retrieval_top_k", None)
+    if top_k is None:
+        return ""  # agent built without the init snapshot: off, not a per-turn config read
+    try:
+        from agent.skill_retrieval import retrieve_skills
+        hits = retrieve_skills(user_message, top_k)
+    except Exception as exc:
+        logger.debug("skills retrieval hint failed: %s", exc)
+        return ""
+    if not hits:
+        return ""
+    lines = [
+        "[Relevant skills — load with skill_view(name) if one applies]",
+        *(f"- {hit.name}: {hit.description}" for hit in hits),
+    ]
+    return "\n".join(lines)
+
+
 def _merge_gateway_notes(
     agent: Any, messages: list[Any], current_turn_user_idx: int, plugin_user_context: str
 ) -> str:
@@ -1397,6 +1426,13 @@ def build_turn_context(
     plugin_user_context = _merge_gateway_notes(
         agent, messages, current_turn_user_idx, plugin_user_context
     )
+    skills_retrieval_hint = "" if plugin_block_message else _skills_retrieval_hint(
+        agent, original_user_message)
+    if skills_retrieval_hint:
+        plugin_user_context = (
+            plugin_user_context + "\n\n" + skills_retrieval_hint
+            if plugin_user_context else skills_retrieval_hint
+        )
 
     _bind_interrupt_scope(agent, ra)
     # A vetoed prompt never leaves the host: no external-memory prefetch, no titling call.
