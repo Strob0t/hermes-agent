@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -140,3 +142,34 @@ def _write_usage_file(path: Optional[str], result: dict, failure: Optional[str] 
         out.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     except Exception:
         pass
+
+
+def oneshot_mcp_wait_seconds(agent_config: object) -> float:
+    """``agent.oneshot_mcp_wait_seconds`` from an ``agent`` config section; 0 (off) when missing or invalid."""
+    value = agent_config.get("oneshot_mcp_wait_seconds") if isinstance(agent_config, dict) else None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return 0.0
+    return float(value) if value > 0 else 0.0
+
+
+def wait_for_oneshot_mcp_discovery(seconds: float) -> bool:
+    """Wait at most ``seconds`` for MCP discovery still in flight before a one-shot turn takes its tool
+    snapshot (a one-shot run has no second turn to pick up a late server). Returns True when it waited;
+    ``seconds <= 0`` returns False at once."""
+    if not seconds or seconds <= 0:
+        return False
+    deadline = time.monotonic() + seconds
+    from hermes_cli.mcp_startup import wait_for_mcp_discovery
+    wait_for_mcp_discovery(timeout=seconds)
+    try:
+        from tools import mcp_tool
+    except Exception:
+        return True
+    pause = threading.Event()
+    while time.monotonic() < deadline:
+        with mcp_tool._lock:
+            connecting = bool(mcp_tool._server_connecting)
+        if not connecting:
+            break
+        pause.wait(min(0.05, max(0.0, deadline - time.monotonic())))
+    return True

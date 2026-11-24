@@ -6,10 +6,13 @@ wrapping the actual execution callback. Agent-loop call sites and plugins share 
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List
+
+from agent.execution_receipt import active_turn_receipt
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,21 @@ class RequestMiddlewareResult:
     original_payload: Any
     changed: bool = False
     trace: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class ExecutionMiddlewareProvenance:
+    """Host-owned facts of one execution middleware chain, for the turn execution receipt."""
+
+    terminal_reached: bool = False
+    frames: list[dict[str, str]] = field(default_factory=list)
+
+
+def middleware_registration_id(kind: str, ordinal: int, callback: Callable) -> str:
+    """Stable opaque ID of one registration; plugin-controlled names never leave the hash."""
+    name = f"{getattr(callback, '__module__', '')}.{getattr(callback, '__qualname__', type(callback).__qualname__)}"
+    material = "\x1f".join(("hermes.middleware-registration/v1", kind, str(ordinal), name))
+    return "mw-sha256:" + hashlib.sha256(material.encode("utf-8", errors="surrogatepass")).hexdigest()
 
 
 def observer_payload(**kwargs: Any) -> dict[str, Any]:
@@ -136,8 +154,16 @@ def apply_tool_request_middleware(
 def run_llm_execution_middleware(
     request: dict[str, Any], next_call: Callable[[dict[str, Any]], Any], **context: Any) -> Any:
     """Run provider execution through registered LLM execution middleware."""
-    return _run_execution_chain(
-        LLM_EXECUTION_MIDDLEWARE, next_call,
+    receipt = active_turn_receipt()
+    if receipt is None:
+        return _run_execution_chain(
+            LLM_EXECUTION_MIDDLEWARE, next_call,
+            request=request, original_request=context.pop("original_request", request), **context)
+    probe = receipt.begin_provider_request(
+        str(context.get("api_request_id") or ""),
+        request_middleware_applied=len(context.get("middleware_trace") or ()))
+    return _run_receipted_chain(
+        LLM_EXECUTION_MIDDLEWARE, next_call, probe,
         request=request, original_request=context.pop("original_request", request), **context)
 
 
@@ -145,9 +171,31 @@ def run_tool_execution_middleware(
     tool_name: str, args: dict[str, Any], next_call: Callable[[dict[str, Any]], Any], **context: Any,
 ) -> Any:
     """Run tool execution through registered tool execution middleware."""
-    return _run_execution_chain(
-        TOOL_EXECUTION_MIDDLEWARE, next_call,
+    receipt = active_turn_receipt()
+    probe = None if receipt is None else receipt.begin_tool_request(
+        tool_name=tool_name, tool_call_id=str(context.get("tool_call_id") or ""),
+        api_request_id=str(context.get("api_request_id") or ""))
+    if probe is None:
+        return _run_execution_chain(
+            TOOL_EXECUTION_MIDDLEWARE, next_call,
+            tool_name=tool_name, args=args, original_args=context.pop("original_args", args), **context)
+    return _run_receipted_chain(
+        TOOL_EXECUTION_MIDDLEWARE, next_call, probe,
         tool_name=tool_name, args=args, original_args=context.pop("original_args", args), **context)
+
+
+def _run_receipted_chain(kind: str, next_call: Callable[[Any], Any], probe: Any, **kwargs: Any) -> Any:
+    """``_run_execution_chain`` with the terminal callback and each frame's decision recorded."""
+    provenance = ExecutionMiddlewareProvenance()
+
+    def terminal_call(payload: Any) -> Any:
+        provenance.terminal_reached = True
+        return probe.dispatch(lambda: next_call(payload))
+
+    try:
+        return _run_execution_chain(kind, terminal_call, _provenance=provenance, **kwargs)
+    finally:
+        probe.close(provenance)
 
 
 class _DownstreamExecutionError(Exception):
@@ -159,7 +207,8 @@ class _DownstreamExecutionError(Exception):
         self.original = original
 
 
-def _run_execution_chain(kind: str, terminal_call: Callable[[Any], Any], **kwargs: Any) -> Any:
+def _run_execution_chain(kind: str, terminal_call: Callable[[Any], Any], *,
+                         _provenance: ExecutionMiddlewareProvenance | None = None, **kwargs: Any) -> Any:
     from hermes_cli.plugins import _delivery_manager
     from hermes_cli.plugins_dispatch import PluginDispatchMixin
 
@@ -174,6 +223,10 @@ def _run_execution_chain(kind: str, terminal_call: Callable[[Any], Any], **kwarg
             return terminal_call(payload)
 
         callback = callbacks[index]
+        frame = None
+        if _provenance is not None:
+            frame = {"middleware_id": middleware_registration_id(kind, index, callback), "decision": "raised"}
+            _provenance.frames.append(frame)
         next_called = False
         next_succeeded = False
         next_result: Any = None
@@ -200,10 +253,18 @@ def _run_execution_chain(kind: str, terminal_call: Callable[[Any], Any], **kwarg
         call_kwargs[payload_key] = payload
         call_kwargs["next_call"] = next_call
         try:
-            return callback(**PluginDispatchMixin._hook_callback_kwargs(callback, call_kwargs))  # narrow signatures, as hooks
+            result = callback(**PluginDispatchMixin._hook_callback_kwargs(callback, call_kwargs))  # narrow signatures, as hooks
+            if frame is not None:
+                frame["decision"] = "continued" if next_called else "short_circuited"
+            return result
         except _DownstreamExecutionError as exc:
+            if frame is not None:
+                frame["decision"] = "continued"
             raise exc.original
         except Exception as exc:
+            if frame is not None:
+                frame["decision"] = ("continued" if next_succeeded else "raised" if next_called
+                                     else "failed_open")
             # Runs once per tool/LLM call: a mis-declared callback fails identically every time,
             # so it goes through the manager's warn-once reporter (#111922).
             manager._report_hook_failure(kind, callback, call_kwargs, exc, surface="Middleware")
