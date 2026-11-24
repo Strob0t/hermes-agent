@@ -6,9 +6,9 @@ name: upstream-rebase-check
 # upstream tag, then runs the local-tests. The outcomes:
 #   - rebase conflict  -> an upstream change touched our patch lines: open an issue with the reject.
 #   - rebase clean but local-tests fail -> upstream moved the behaviour around our lines: open an issue.
-#   - rebase clean and local-tests pass -> open a draft PR with the rebased branch for review.
+#   - rebase clean and local-tests pass -> comment the run on the open check issues and close them.
 #   - target == base (nothing new upstream) -> no-op.
-# It never pushes to the patch branch and never merges on its own. A human reviews the draft PR.
+# It never pushes a branch and never merges on its own. The rebase itself is done at the release upgrade.
 #
 # Needs the repo to have a git remote-less checkout; the workflow adds the upstream remote itself.
 # Enable "Allow GitHub Actions to create and approve pull requests" in the repo settings for the
@@ -176,17 +176,24 @@ jobs:
           gh issue create --title "$TITLE" --body-file "$BODY" --label "upstream-rebase" || \
           gh issue create --title "$TITLE" --body-file "$BODY"
 
-      - name: Push the rebased branch and open a draft PR on success
+      - name: Report a clean rebase on the open issues and close them
         if: steps.tests.outputs.result == 'pass'
         env:
           GH_TOKEN: ${{ github.token }}
           TARGET: ${{ steps.target.outputs.target }}
-          PROBE: ${{ steps.rebase.outputs.probe_branch }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          git push -f origin "$PROBE"
-          TITLE="upstream-rebase-check: clean rebase onto $TARGET (review)"
-          EXISTING=$(gh pr list --state open --head "$PROBE" --json number --jq 'length')
-          if [ "$EXISTING" != "0" ]; then echo "draft PR already open"; exit 0; fi
-          gh pr create --draft --base "$PATCH_BRANCH" --head "$PROBE" \
-            --title "$TITLE" \
-            --body-file report.md
+          # No branch push: the GITHUB_TOKEN cannot push upstream commits that change workflow files.
+          # The rebase itself is done at the release upgrade (A in build/hermes/README.md).
+          {
+            echo "upstream-rebase-check: the patch series rebases cleanly onto upstream \`$TARGET\` and the local-tests pass."
+            echo
+            echo "Run: $RUN_URL"
+            echo
+            cat report.md
+          } > comment.md
+          for N in $(gh issue list --state open --search 'in:title "upstream-rebase-check:"' --json number --jq '.[].number'); do
+            gh issue comment "$N" --body-file comment.md
+            gh issue close "$N" --reason completed
+            echo "closed #$N"
+          done
