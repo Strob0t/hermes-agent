@@ -576,6 +576,12 @@ export const FIELD_LABELS: Record<string, string> = defineFieldCopy({
     userCharLimit: 'Profile Budget',
     provider: 'Memory Provider'
   },
+  skills: {
+    retrieval: {
+      enabled: 'Relevant Skill Hints',
+      topK: 'Skill Hint Count'
+    }
+  },
   context: {
     engine: 'Context Engine'
   },
@@ -654,6 +660,12 @@ export const FIELD_DESCRIPTIONS: Record<string, string> = defineFieldCopy({
   memory: {
     memoryEnabled: 'Save durable memories that can help future sessions.',
     userProfileEnabled: 'Maintain a compact profile of user preferences.'
+  },
+  skills: {
+    retrieval: {
+      enabled: 'Append the most relevant skills for each message to the outgoing turn only.',
+      topK: 'Number of skill hints to include, between 1 and 5.'
+    }
   },
   context: {
     engine: 'Strategy for managing long conversations near the context limit.'
@@ -780,6 +792,8 @@ export const SECTIONS: DesktopConfigSection[] = [
       'memory.memory_char_limit',
       'memory.user_char_limit',
       'memory.provider',
+      'skills.retrieval.enabled',
+      'skills.retrieval.top_k',
       'context.engine',
       'compression.enabled',
       'compression.threshold',
