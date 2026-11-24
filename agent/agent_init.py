@@ -1282,6 +1282,32 @@ def _apply_agent_section(agent, _agent_cfg):
         agent._auto_recovery_cycles = max(int(_agent_section.get("auto_recovery_cycles", 5)), 0)
     except (TypeError, ValueError):
         agent._auto_recovery_cycles = 5
+    _apply_retry_delays(agent, _agent_section)
+
+
+def _retry_delay(raw: Any, default: float) -> float:
+    """``raw`` as seconds clamped to >= 0; ``default`` when unset or unparseable."""
+    if raw is None:
+        return default
+    try:
+        return max(float(raw), 0.0)
+    except (TypeError, ValueError):
+        return default
+
+
+def _apply_retry_delays(agent, _agent_section: dict[str, Any]) -> None:
+    """Jittered-backoff delays of the API retry loop. An unset max keeps each site's
+    built-in cap (invalid response 120s, empty response 60s, rate limit 60s, Retry-After 600s)."""
+    from agent.retry_utils import RETRY_AFTER_CAP_S
+
+    _max = _agent_section.get("retry_max_delay")
+    _rl_max = _agent_section.get("rate_limit_retry_max_delay")
+    agent._retry_base_delay = _retry_delay(_agent_section.get("retry_base_delay"), 5.0)
+    agent._retry_max_delay = _retry_delay(_max, 120.0)
+    agent._empty_retry_max_delay = _retry_delay(_max, 60.0)
+    agent._rate_limit_retry_base_delay = _retry_delay(_agent_section.get("rate_limit_retry_base_delay"), 2.0)
+    agent._rate_limit_retry_max_delay = _retry_delay(_rl_max, 60.0)
+    agent._retry_after_cap = _retry_delay(_rl_max, RETRY_AFTER_CAP_S)
 
 
 def _positive_int(raw: Any, *, reject: tuple = ()) -> Optional[int]:
