@@ -2355,6 +2355,13 @@ agent:
   stall_guards: false
 ```
 
+`agent.post_tool_placeholder_nudge` (default `false`) is an opt-in third detector on the same bounded continuation counter (max 2 re-prompts per turn). When a tool result is in the last 6 messages and the model's whole reply is only a short progress marker ("working on it", "on it", "processing...", "one moment", "正在处理", "处理中"), Hermes keeps the reply as an interim row and sends one "complete the task now" nudge. It fires at most once per turn; the flag resets at the next turn. Bare acknowledgements such as "ok", "sure" or "收到" never match. With the default `false` the turn ends on the placeholder as before:
+
+```yaml
+agent:
+  post_tool_placeholder_nudge: true
+```
+
 The same gate also enables **result-reference stubbing**: when a re-issued identical tool call returns a byte-identical fresh result, the duplicate payload enters context as a short reference stub pointing at the earlier result (tool name, `tool_call_id`, an args summary, and — if the first result was persisted to disk — its spillover path) instead of repeating the full output. The tool still executes every time, so polling semantics are preserved: a changed result always flows through whole. Results under 512 characters, error results, and multimodal results are never stubbed, and pollers *are* stubbed (an unchanged poll is exactly the case where the duplicate payload carries no information).
 
 ### Turn liveness watchdog

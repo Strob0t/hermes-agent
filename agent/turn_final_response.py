@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
+import re
 from typing import Any, Callable, Dict, Optional
 
 from agent.message_metadata import append_message
@@ -28,6 +29,45 @@ _REPETITION_STOPPED = repetition_copy(
     "; refusing to return a",
 )
 logger = logging.getLogger("agent.conversation_loop")
+
+# Opt-in (agent.post_tool_placeholder_nudge): a reply that is ONLY a short progress marker
+# ("working on it", "on it", "正在处理") right after tool results. Bare acknowledgements
+# ("ok", "sure", "收到") and open-ended "I'll ..." plans are deliberately not matched.
+_POST_TOOL_PLACEHOLDER_RE = re.compile(
+    r"^(?:"
+    r"(?:i'?m |i am |still )*(?:working on (?:it|this|that)|on it|writing|processing"
+    r"|just a (?:moment|sec|second)|one (?:moment|sec|second))(?: now)?"
+    r"|(?:好的[，,]?\s*)?我?(?:正在|马上|这就)(?:处理|写|分析|查看|执行)中?"
+    r"|处理中"
+    r")\s*[.!。！…]*$",
+    re.IGNORECASE,
+)
+_POST_TOOL_PLACEHOLDER_NUDGE = (
+    "You returned a status message instead of the actual result. "
+    "Please complete the task and provide your full response now."
+)
+
+
+def _post_tool_placeholder_nudge_enabled() -> bool:
+    try:
+        from hermes_cli.config import cfg_get, load_config_readonly
+        return cfg_get(load_config_readonly(), "agent", "post_tool_placeholder_nudge", default=False) is True
+    except Exception as exc:
+        logger.debug("agent.post_tool_placeholder_nudge unreadable; nudge off: %s", exc)
+        return False
+
+
+def _is_post_tool_placeholder(agent: Any, text: str, messages: Any) -> bool:
+    """Short progress-only reply right after tool rows, not yet nudged this turn, key on."""
+    clean = (text or "").strip()
+    return (
+        not getattr(agent, "_post_tool_placeholder_retried", False)
+        and len(clean) < 120
+        and any(isinstance(m, dict) and m.get("role") == "tool" for m in (messages or [])[-6:])
+        and bool(_POST_TOOL_PLACEHOLDER_RE.match(clean))
+        and _post_tool_placeholder_nudge_enabled()
+    )
+
 
 # Ephemeral retry scaffolding rows popped before the final answer becomes durable.
 _EPHEMERAL_SCAFFOLDING_FLAGS = (
@@ -219,6 +259,8 @@ def finish_text_response(
         _continuation_kind = "stall"
     elif _degenerate_final:
         _continuation_kind = "degenerate"
+    elif codex_ack_continuations < 2 and _is_post_tool_placeholder(agent, _stall_text, messages):
+        _continuation_kind = "placeholder"
     elif (
         _ack_mode != "off"
         and agent.valid_tool_names
@@ -244,6 +286,12 @@ def finish_text_response(
                 "re-prompting (%d/2)", len(_stall_text), _stall_text[:40], _tool_rows,
                 codex_ack_continuations + 1,
             )
+        elif _continuation_kind == "placeholder":
+            agent._post_tool_placeholder_retried = True
+            logger.info(
+                "Progress-only reply after tool calls (%r) — nudging model to continue (%d/2)",
+                _stall_text.strip()[:80], codex_ack_continuations + 1,
+            )
         codex_ack_continuations += 1
         interim_msg = agent._build_assistant_message(assistant_message, "incomplete")
         if _promoted:
@@ -256,6 +304,7 @@ def finish_text_response(
             "role": "user",
             "content": (
                 _DEGENERATE_FINAL_NUDGE if _continuation_kind == "degenerate"
+                else _POST_TOOL_PLACEHOLDER_NUDGE if _continuation_kind == "placeholder"
                 else _CODEX_ACK_CONTINUATION_NUDGE
             ),
         })

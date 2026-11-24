@@ -173,6 +173,10 @@ DEFAULT_CONFIG = {
         # exempt); (2) continue-intent extension of empty-response recovery re-prompts once when the
         # model says it will continue but takes no action. False disables both.
         "stall_guards": True,
+        # Opt-in: after tool results, a reply that is only a progress marker ("working on it",
+        # "on it", "正在处理") gets one "finish the task" nudge per turn, under the same max-2
+        # continuation counter as the stall/ack guards. Bare "ok" never matches. False = off.
+        "post_tool_placeholder_nudge": False,
         # "Finish the job" prompt block for all models: don't stop at a stub, never fabricate output
         # when the real path is blocked. ~80 cached tokens. False disables.
         "task_completion_guidance": True,
