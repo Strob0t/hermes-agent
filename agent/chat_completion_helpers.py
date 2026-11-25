@@ -41,7 +41,7 @@ from agent.gemini_native_adapter import is_native_gemini_base_url
 # Never fingerprint a remote endpoint: Ollama-compat routes misidentify and 401 without a key (#89863).
 from agent.model_metadata import is_local_endpoint
 from agent.process_transport import waits_like_local
-from agent.message_content import flatten_message_text
+from session_rules.turns import flatten_message_text
 from agent.message_metadata import PERSISTENCE_ONLY_MESSAGE_FIELDS, append_message, data_use_requirement, stamp_message_timestamp
 from agent.message_sanitization import (
     _sanitize_messages_surrogates, _sanitize_surrogates, _repair_tool_call_arguments,
@@ -54,6 +54,7 @@ from agent.repetition_guard import RunawayStreamWatch, is_repetition_dominated
 from agent.stream_single_writer import claim_stream_writer, stream_writer_is_current
 from tools.terminal_tool_lifecycle import is_persistent_env
 from utils import base_url_host_matches, base_url_hostname, env_float, env_int
+from session_rules.turns import _IMAGE_PART_TYPES
 
 logger = logging.getLogger(__name__)
 _OPENROUTER_PROVIDER_SORT_VALUES = {"throughput", "latency", "price"}
@@ -365,9 +366,6 @@ def _provider_stream_error_from_text(text: str, finish_reason: Optional[str], *,
     if text.strip():
         return _error({}, None)
     return None
-
-
-_IMAGE_PART_TYPES = frozenset({"image_url", "input_image", "image"})
 
 
 def _image_part_chars(part: dict[str, Any], image_cost: int) -> int:
@@ -1591,8 +1589,8 @@ def _assistant_tool_call_dict(agent, tool_call, index: int) -> dict:
     tc_dict = {"id": call_id, "call_id": call_id, "response_item_id": response_item_id,
         "type": tool_call.type,
         "function": {"name": tool_call.function.name, "arguments": tool_call.function.arguments}}
-    # Preserve extra_content (Gemini thought_signature) or Gemini 3 thinking
-    # models 400 on the next request.
+    if type(output_index := getattr(tool_call, "_codex_output_index", None)) is int:
+        tc_dict["_codex_output_index"] = output_index
     # Tool-call arguments are intentionally NOT redacted here. This dict enters the in-memory conversation
     # history that is replayed to the model on every subsequent turn AND persisted to state.db, which is
     # itself replayed verbatim on session resume (get_messages_as_conversation). Masking a credential to
@@ -1756,40 +1754,6 @@ def _fallback_entry_unavailable_without_network(agent, fb: dict) -> Optional[str
         return f"nous_auth_unreadable:{type(exc).__name__}"
     has_token = any(isinstance(t, str) and t.strip() for t in (state.get("access_token"), state.get("refresh_token")))
     return None if has_token else "nous_token_missing"
-
-
-_FALLBACK_REASON_LABELS = {
-    FailoverReason.auth: "authentication failed",
-    FailoverReason.auth_permanent: "authentication permanently failed",
-    FailoverReason.billing: "billing or quota exhausted",
-    FailoverReason.rate_limit: "rate limit",
-    FailoverReason.upstream_rate_limit: "upstream model rate limit",
-    FailoverReason.overloaded: "provider overloaded",
-    FailoverReason.server_error: "provider server error",
-    FailoverReason.timeout: "request timeout",
-    FailoverReason.ssl_cert_verification: "TLS certificate verification failed",
-    FailoverReason.context_overflow: "context window exceeded",
-    FailoverReason.payload_too_large: "request payload too large",
-    FailoverReason.image_too_large: "image payload too large",
-    FailoverReason.model_not_found: "model not found",
-    FailoverReason.provider_policy_blocked: "provider policy blocked the request",
-    FailoverReason.content_policy_blocked: "content policy blocked the request",
-    FailoverReason.format_error: "request format rejected",
-    FailoverReason.role_alternation: "adjacent same-role messages rejected",
-    FailoverReason.invalid_encrypted_content: "encrypted reasoning state rejected",
-    FailoverReason.multimodal_tool_content_unsupported: "multimodal tool content unsupported",
-    FailoverReason.thinking_signature: "thinking signature rejected",
-    FailoverReason.long_context_tier: "long-context tier unavailable",
-    FailoverReason.oauth_long_context_beta_forbidden: "OAuth long-context beta unavailable",
-    FailoverReason.llama_cpp_grammar_pattern: "grammar pattern rejected",
-    FailoverReason.unknown: "provider failure",
-}
-
-
-def _fallback_reason_text(reason: FailoverReason | None) -> str:
-    """Return a concise operator-facing explanation for a fallback switch."""
-    label = _FALLBACK_REASON_LABELS.get(reason)
-    return label or str(getattr(reason, "value", None) or reason or "provider failure").replace("_", " ")
 
 
 def _is_anthropic_wire_url(url: str) -> bool:
@@ -2020,22 +1984,12 @@ def _rescope_fallback_extra_body(agent, old_model: str, old_provider: str, old_b
         logger.debug("Failed to resolve extra_body for fallback %s; keeping current: %s", agent.model, _eb_err)
 
 
-def _buffer_fallback_notice(agent, notice: str) -> None:
-    """Buffer the switch notice for terminal failure AND retain it as a durable one-shot for
-    _emit_pending_fallback_notice (a successful fallback clears retry chatter)."""
-    agent._buffer_diagnostic_status(notice)
-    pending = getattr(agent, "_pending_fallback_notice", None)
-    if isinstance(pending, list):
-        pending.append(notice)
-    else:
-        agent._pending_fallback_notice = [str(pending), notice] if pending else [notice]
-
-
 def try_activate_fallback(agent, reason: FailoverReason | None = None, reset_at=None) -> bool:
     """Switch to the next fallback model/provider in the chain; False when exhausted. Swaps client,
     model slug and provider in place so the retry loop continues on the new backend; client
     construction goes through resolve_provider_client (no duplicated provider→key mappings)."""
     from agent.fallback_cooldown import _arm_rate_limit_cooldown, switch_deferred_by_reset
+    from agent.fallback_notice import announce_fallback_switch, fallback_trigger_text
     if switch_deferred_by_reset(agent, reason, reset_at):
         return False
     cooldown_seconds = _arm_rate_limit_cooldown(agent, reason, reset_at=reset_at)
@@ -2065,12 +2019,12 @@ def try_activate_fallback(agent, reason: FailoverReason | None = None, reset_at=
             rewrite_prompt_model_identity(agent, fb_model, fb_provider)
 
             notice = (
-                f"⚠️ Model fallback: {old_model} via {old_provider} unavailable "
-                f"({_fallback_reason_text(reason)}); using {fb_model} via {fb_provider}.")
+                f"⚠️ Model fallback: {old_model} via {old_provider} could not respond "
+                f"({fallback_trigger_text(agent, reason)}); using {fb_model} via {fb_provider}.")
             if cooldown_seconds is not None:
                 remaining = max(0, math.ceil(agent._rate_limited_until - time.monotonic()))
                 notice += f" Primary retry eligible in ~{remaining} s; recovery is not guaranteed."
-            _buffer_fallback_notice(agent, notice)
+            announce_fallback_switch(agent, notice)
             # ``_fallback_activated`` is also reused by `/model --once` restoration; separate
             # provenance so the restore path only emits a recovery notice after a real fallback.
             agent._provider_fallback_active = True
@@ -2179,6 +2133,28 @@ def _iteration_summary_api_messages(agent, messages: list) -> list:
     return api_messages
 
 
+def _summary_request_middleware(agent, request, api_request_id: str, api_call_count: int = 0):
+    """Run the iteration-summary request through the same ``llm_request`` middleware as a normal
+    turn call (agent/turn_api_request.py). Without it a session model that a middleware resolves
+    (for example a router alias) goes to the provider unchanged and the summary fails."""
+    if not isinstance(request, dict):
+        return request
+    try:
+        from hermes_cli.middleware import apply_llm_request_middleware
+
+        return apply_llm_request_middleware(
+            request, task_id=getattr(agent, "_current_task_id", "") or "",
+            turn_id=getattr(agent, "_current_turn_id", "") or "", api_request_id=api_request_id,
+            session_id=agent.session_id or "", platform=agent.platform or "", model=agent.model,
+            provider=agent.provider, base_url=agent.base_url, api_mode=agent.api_mode,
+            api_call_count=api_call_count, call_role="iteration_summary",
+        ).payload
+    except Exception:
+        logger.warning("LLM request middleware failed for the iteration summary; sending it unmodified",
+                       exc_info=True)
+        return request
+
+
 def _managed_summary_call(agent, api_request_id: str, request, callback, *, retry_count: int):
     from agent import relay_llm
     return relay_llm.execute_current(
@@ -2203,7 +2179,7 @@ def _summary_text(agent, response, **normalize_kwargs) -> str:
     return (normalized.content or "").strip()
 
 
-def _codex_summary_attempt(agent, api_messages: list, api_request_id: str):
+def _codex_summary_attempt(agent, api_messages: list, api_request_id: str, api_call_count: int = 0):
     def _attempt(retry_count: int) -> str:
         codex_kwargs = agent._build_api_kwargs(api_messages)
         # The transport emits these three as one block (transports/codex.py build_kwargs);
@@ -2211,6 +2187,7 @@ def _codex_summary_attempt(agent, api_messages: list, api_request_id: str):
         codex_kwargs.pop("tools", None)
         codex_kwargs.pop("tool_choice", None)
         codex_kwargs.pop("parallel_tool_calls", None)
+        codex_kwargs = _summary_request_middleware(agent, codex_kwargs, api_request_id, api_call_count)
         # Route through the same seam as normal Codex turns: a direct _run_codex_stream
         # bypasses the stale/TTFB watchdogs, interrupt handling and client cleanup, so an
         # unattended cron summary could wedge forever (#70943).
@@ -2218,20 +2195,21 @@ def _codex_summary_attempt(agent, api_messages: list, api_request_id: str):
     return _attempt
 
 
-def _anthropic_summary_attempt(agent, api_messages: list, api_request_id: str):
+def _anthropic_summary_attempt(agent, api_messages: list, api_request_id: str, api_call_count: int = 0):
     def _attempt(retry_count: int) -> str:
         ant_kw = agent._get_transport().build_kwargs(
             model=agent.model, messages=api_messages, tools=None, max_tokens=agent.max_tokens,
             reasoning_config=agent.reasoning_config, is_oauth=agent._is_anthropic_oauth,
             preserve_dots=agent._anthropic_preserve_dots(), base_url=getattr(agent, "_anthropic_base_url", None))
         ant_kw = _merge_nous_portal_messages_extra_body(agent, ant_kw, api_messages)
+        ant_kw = _summary_request_middleware(agent, ant_kw, api_request_id, api_call_count)
         response = _managed_summary_call(
             agent, api_request_id, ant_kw, agent._interruptible_api_call, retry_count=retry_count)
         return _summary_text(agent, response, strip_tool_prefix=agent._is_anthropic_oauth)
     return _attempt
 
 
-def _chat_summary_attempt(agent, api_messages: list, api_request_id: str):
+def _chat_summary_attempt(agent, api_messages: list, api_request_id: str, api_call_count: int = 0):
     # Same kwargs builder as the main loop so the summary keeps the cached prefix (tools,
     # prompt_cache_key, xAI alias, Moonshot sanitization). Do not omit tools or force
     # tool_choice="none" here: SGLang renders the prompt with tools=None in that mode and the KV
@@ -2240,6 +2218,7 @@ def _chat_summary_attempt(agent, api_messages: list, api_request_id: str):
     # The summary now carries ``tools``; on cache-planned routes the main loop scrubbed a deep
     # copy, so ``agent.tools`` may still hold bytes the provider 400s on.
     sanitize_outbound_kwargs(agent, summary_kwargs)
+    summary_kwargs = _summary_request_middleware(agent, summary_kwargs, api_request_id, api_call_count)
     from agent.conversation_loop import _moa_client_consumes_prepared_request
     if agent.provider == "moa" and _moa_client_consumes_prepared_request(agent.client):  # transport strips data_use
         summary_kwargs["_moa_prepared_request"] = agent.client.chat.completions.prepare(api_messages)
@@ -2278,7 +2257,7 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     try:
         api_messages = _iteration_summary_api_messages(agent, messages)
         build_attempt = _SUMMARY_ATTEMPT_BUILDERS.get(agent.api_mode, _chat_summary_attempt)
-        attempt = build_attempt(agent, api_messages, summary_api_request_id)
+        attempt = build_attempt(agent, api_messages, summary_api_request_id, api_call_count=api_call_count)
 
         # One retry on an empty summary; a summary empty once its <think> block is stripped is NOT retried.
         final_response = _EMPTY_SUMMARY_RESPONSE

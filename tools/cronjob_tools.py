@@ -505,28 +505,24 @@ def _run_session_usage(job_id: str, execution_id: Optional[str]) -> dict[str, An
     compression chain), or ``{}`` when no run session exists (no_agent job, refused fire)."""
     if not execution_id:
         return {}
-    import sqlite3
-
     from hermes_constants import get_hermes_home
-    from hermes_state import SessionDB
+    from persistence.conversation.sessions import SessionWindow
+    from persistence.core.errors import PersistenceError
+    from persistence_assembly import open_persistence_reader
     # A missing or locked state.db costs the notice its usage line, never the completion.
     try:
-        db = SessionDB(db_path=get_hermes_home() / "state.db", read_only=True)
-    except (sqlite3.Error, OSError):
-        return {}
-    try:
-        run = next((r for r in db.list_cron_job_runs(job_id, limit=50)
-                    if r.get("cron_execution_id") == execution_id), None)
-        if run is None:
-            return {}
-        rows = [db.get_session(sid) or {} for sid in db.get_compression_chain(run["id"])]
-    except sqlite3.Error as exc:
+        with open_persistence_reader(get_hermes_home()) as reader:
+            run = next((r for r in reader.sessions.list_cron_job_runs(job_id, SessionWindow(limit=50))
+                        if r.cron_execution_id == execution_id), None)
+            if run is None:
+                return {}
+            rows = [row for sid in reader.lineage.chain(run.entry.session.session_id)
+                    if (row := reader.sessions.get(sid)) is not None]
+    except (PersistenceError, OSError) as exc:
         logger.debug("cronjob run: run-session usage lookup failed for %s: %s", job_id, exc)
         return {}
-    finally:
-        db.close()
-    model = next((r["model"] for r in reversed(rows) if r.get("model")), None)
-    return {"api_calls": sum(int(r.get("api_call_count") or 0) for r in rows), **({"model": model} if model else {})}
+    model = next((r.model for r in reversed(rows) if r.model), None)
+    return {"api_calls": sum(int(r.api_call_count or 0) for r in rows), **({"model": model} if model else {})}
 
 
 def _manual_run_completion(
@@ -862,6 +858,14 @@ def _wrap_response_override(value: Any) -> Any:
     return value
 
 
+def _resolve_update_deliver(job: dict[str, Any], deliver: Optional[str]) -> Optional[str]:
+    """Keep literal 'origin' when the edited job already owns one; else resolve as on create."""
+    owned = job.get("origin") or any(
+        "origin" in [p.strip().lower() for p in str(job.get(k) or "").split(",")]
+        for k in ("deliver", "failure_deliver"))
+    return deliver if owned else _resolve_cron_context_deliver(deliver)
+
+
 def _update_core_fields(job: dict[str, Any], a: dict[str, Any], updates: dict[str, Any]) -> Optional[str]:
     """prompt / name / deliver / skills / model pins; returns an error string or None."""
     prompt, deliver, skill, skills = a["prompt"], a["deliver"], a["skill"], a["skills"]
@@ -878,7 +882,7 @@ def _update_core_fields(job: dict[str, Any], a: dict[str, Any], updates: dict[st
         bot_chat_error = _validate_bot_chat_deliver(_normalize_deliver_param(deliver))
         if bot_chat_error:
             return bot_chat_error
-        updates["deliver"] = _resolve_cron_context_deliver(_normalize_deliver_param(deliver))
+        updates["deliver"] = _resolve_update_deliver(job, _normalize_deliver_param(deliver))
     if a["failure_deliver"] is not None:
         # '' clears the override (failures fall back to deliver); non-empty values share
         # deliver's validation AND its cron-context origin resolution (a job created from
@@ -888,7 +892,7 @@ def _update_core_fields(job: dict[str, Any], a: dict[str, Any], updates: dict[st
             bot_chat_error = _validate_bot_chat_deliver(_norm_fd)
             if bot_chat_error:
                 return bot_chat_error
-            _norm_fd = _resolve_cron_context_deliver(_norm_fd)
+            _norm_fd = _resolve_update_deliver(job, _norm_fd)
         updates["failure_deliver"] = _norm_fd
     if a["catch_up"] is not None:
         updates["catch_up"] = a["catch_up"]

@@ -5,6 +5,7 @@ docs of config.yaml.
 """
 
 from hermes_cli.config_defaults_auxiliary import _aux
+from hermes_cli.config_defaults_tool_output import TOOL_OUTPUT_DEFAULTS
 from hermes_cli.config_defaults_voice import VOICE_DEFAULTS
 
 #: Image every container terminal backend (docker/modal/daytona, the singularity plugin) uses unless the
@@ -116,16 +117,20 @@ DEFAULT_CONFIG = {
         # many slow/unreachable MCP servers.
         # See #63078.
         "build_wait_timeout": 600,
-        # Hermes-level retry attempts for API errors (connection drops, timeouts, 5xx) wrapping the
-        # whole call; the OpenAI SDK also retries transient errors (max_retries=2). Set 1 for fast
-        # failover to fallback providers; raise to tolerate longer provider hiccups.
+        # Hermes-level retries for API errors (connection drops, timeouts, 5xx) around the whole call; the
+        # SDK also retries (max_retries=2). Set 1 for fast failover to fallbacks; raise for longer hiccups.
         "api_max_retries": 3,
+        "codex_request_compression": True,  # zstd to official Codex; a bare-400 frame resends as JSON
         # Once api_max_retries AND the fallback chain are spent on a transient outage (5xx,
         # overloaded/529, connect/read timeouts) with nothing delivered yet, wait and retry this many
         # more cycles (jittered 15/30/60/60/60s; a provider Retry-After wins up to 120s) with a
         # visible "retrying automatically" countdown instead of ending the turn. Esc/interrupt stops
         # the wait; auth/format/billing/policy errors never enter. 0 disables.
         "auto_recovery_cycles": 5,
+        # Opt-in (0 = off). When the fallback chain is spent and the armed rate-limit cooldown is at
+        # most this many seconds, wait it out once (interruptible) and retry once; a second rate
+        # limit in the same turn ends the turn as before. Clamped to 60 (the wait holds the turn lease).
+        "rate_limit_tail_wait_seconds": 0,
         # Seconds the Codex/Responses stream may keep reading after its terminal frame so the relay
         # finalizer can run. Relays that never close the SSE socket after response.completed would
         # otherwise wedge the turn until the idle watchdog discards the already-billed response
@@ -539,7 +544,8 @@ DEFAULT_CONFIG = {
     # Tool-output truncation. max_bytes: terminal_tool output cap in chars (head+tail kept; 50_000 ≈
     # 12-15K tokens). max_lines: max `limit` one read_file call may request before clamping.
     # max_line_length: per-line cap in read_file's line-numbered view (chars).
-    "tool_output": {"max_bytes": 50000, "max_lines": 2000, "max_line_length": 2000},
+    # json_compaction: see config_defaults_tool_output.py.
+    "tool_output": TOOL_OUTPUT_DEFAULTS,
     # Tool loop guardrails nudge models that repeat failed/non-progressing tool calls. Soft warnings
     # are always on; hard stops are opt-in so interactive sessions keep flowing.
     "tool_loop_guardrails": {
@@ -548,10 +554,16 @@ DEFAULT_CONFIG = {
         # Unattended gateway/cron platforms hard-stop by default (nobody can /stop a model that
         # ignores warnings); interactive cli/tui/desktop/acp stay warning-only.
         "non_interactive_hard_stop_enabled": True,
-        "warn_after": {"exact_failure": 2, "same_tool_failure": 3, "idempotent_no_progress": 2},
-        "hard_stop_after": {
-            "exact_failure": 5, "same_tool_failure": 8, "idempotent_no_progress": 5
+        "warn_after": {
+            "exact_failure": 2, "same_tool_failure": 3, "idempotent_no_progress": 2, "repeated_result": 3
         },
+        "hard_stop_after": {
+            "exact_failure": 5, "same_tool_failure": 8, "idempotent_no_progress": 5, "repeated_result": 5
+        },
+        # Consecutive identical results (any tool, any args) shorter than this are not counted.
+        "repeated_result_min_chars": 200,
+        # Terminal commands that poll a job; their unchanged status is never a repeated result.
+        "repeated_result_exempt_command_patterns": [r"\boh-task\.py\s+(status|wait|list)\b"],
         # Per-turn hard ceilings for runaway-prone tools; counters reset every turn, always on
         # regardless of the thresholds above. Dozens of searches/subagents in ONE turn is already
         # pathological, hence low defaults. 0 = unlimited.
@@ -682,11 +694,11 @@ DEFAULT_CONFIG = {
         # Opt-in: write the next summary in the background near the trigger; compaction uses (or waits for) it if it still covers the same messages.
         "prepare_ahead": False,
     },
-    # Anthropic prompt caching (Claude via OpenRouter or native API). cache_ttl: "5m" | "1h" | "auto"
+    # Anthropic prompt caching (Claude via OpenRouter or native API). cache_ttl: "auto" (default) | "5m" | "1h"
     # (auto = 1h for human-paced sessions — cli/tui/desktop/messaging — and 5m for subagent, cron,
-    # oneshot, webhook, kanban, api, tool, batch); falsy (false, null, "off", "disabled", ...) disables caching.
-    # route_ttl_ceilings {<provider>: "5m"|"1h"} overrides a profile's prompt_cache_max_ttl (Nous ships "5m").
-    "prompt_caching": {"cache_ttl": "5m", "route_ttl_ceilings": {}},
+    # oneshot, webhook, kanban, api_server, tool, batch, curator); falsy ("off", null, ...) disables caching.
+    # route_ttl_ceilings {<provider>: "5m"|"1h"} overrides a profile's prompt_cache_max_ttl.
+    "prompt_caching": {"cache_ttl": "auto", "route_ttl_ceilings": {}},
     # OpenRouter settings. response_cache: X-OpenRouter-Cache header — identical requests return
     # cached responses at zero billing; independent of Anthropic prompt caching. response_cache_ttl:
     # seconds (1-86400), only used when response_cache is on. min_coding_score (0.0-1.0):
@@ -2508,7 +2520,7 @@ DEFAULT_CONFIG = {
         # spills the rest to a cache file, so an unbounded walk pays for nodes the model never sees:
         # measured on macOS (cua-driver 0.28.2, M-series) a 1,444-node Chrome window went 540 ms -> 83 ms
         # and a 456-node Finder window 6.9 s -> 0.6 s at 200, with the returned elements a prefix of the
-        # unbounded walk. 0 = driver default (2,000 elements / depth 25) — the pre-fix behaviour.
+        # unbounded walk. 0 omits max_elements: driver default (250 nodes on Cua >= 0.35), not unlimited.
         # ~400 keeps the full first 100 visible elements on a pathological tree, at ~1.4 s on Finder;
         # the walk's cost grows with the bound, so keep it in the low hundreds. This caps the nodes
         # COLLECTED, not the walk's wall clock: a target whose AX surface exceeds the driver's own 20 s
@@ -2663,7 +2675,7 @@ DEFAULT_CONFIG = {
         # Extra ports detection probes for an external llama-server (besides 8080).
         "detect_ports": [],
     },
-    "_config_version": 53,  # Config schema version - bump this when adding new required fields
+    "_config_version": 54,  # Config schema version - bump this when adding new required fields
 }
 
 

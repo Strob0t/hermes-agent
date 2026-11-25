@@ -20,7 +20,8 @@ from agent.context_compressor import (
     _is_summary_access_or_quota_error,
 )
 from agent.compression_marker import _COMPRESSION_MARKER_PREFIX
-from hermes_state import SessionDB
+from tests.fixtures.storage_seed import seed_session
+from tests.gateway.fixtures.storage_handles import close_storage_handles, storage_handle
 from agent.auxiliary_client import CODEX_STREAM_STALL_MARKER
 import itertools
 
@@ -1663,33 +1664,32 @@ class TestAbortOnSummaryFailure:
 
 
 
-
     def test_aux_fallback_clears_persisted_session_cooldown_before_retry(self, tmp_path):
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("s1", "cli")
-        db.record_compression_failure_cooldown("s1", time.time() + 999.0, "timeout")
+        db = storage_handle(tmp_path)
+        seed_session(db, "s1", "cli")
+        db.messages.record_compression_cooldown("s1", time.time() + 999.0, "timeout")
 
         c = self._make_compressor()
-        c.bind_session_state(db, "s1")
+        c.bind_session_state(db, "s1", persistence=db)
         c.summary_model = "aux/model"
 
         c._fallback_to_main_for_compression(Exception("provider down"), "failed")
 
         assert c.summary_model == ""
         assert c._summary_failure_cooldown_until == 0.0
-        assert db.get_compression_failure_cooldown("s1") is None
+        assert db.messages.read_compression_cooldown("s1", time.time()) is None
 
     def test_success_clears_persisted_session_cooldown(self, tmp_path):
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "summary text"
 
-        db = SessionDB(db_path=tmp_path / "state.db")
-        db.create_session("s1", "cli")
-        db.record_compression_failure_cooldown("s1", time.time() + 999.0, "timeout")
+        db = storage_handle(tmp_path)
+        seed_session(db, "s1", "cli")
+        db.messages.record_compression_cooldown("s1", time.time() + 999.0, "timeout")
 
         c = self._make_compressor()
-        c.bind_session_state(db, "s1")
+        c.bind_session_state(db, "s1", persistence=db)
         c._summary_failure_cooldown_until = 0.0
         msgs = self._make_msgs()
 
@@ -1699,7 +1699,7 @@ class TestAbortOnSummaryFailure:
         mock_llm.assert_called()
         assert c._last_compress_aborted is False
         assert len(result) < len(msgs)
-        assert db.get_compression_failure_cooldown("s1") is None
+        assert db.messages.read_compression_cooldown("s1", time.time()) is None
 
 
 
@@ -2848,7 +2848,7 @@ class TestSanitizerPreservesInFlightToolChain:
         the final synthesis built on it were both lost.  The fix preserves the
         trailing in-flight call, so the chain closes and the result survives.
         """
-        from agent.agent_runtime_helpers import repair_message_sequence
+        from session_rules.turns import repair_message_sequence
 
         history = [
             {"role": "user", "content": "Do the work and use the tools."},
@@ -3135,9 +3135,10 @@ class TestSummaryPromptBounding:
     _ELISION_MARKER = re.compile(r"\n*\.\.\.\[[^\]]*elided[^\n]*\.\.\.\n*")
 
     def test_lean_sampling_keeps_record_boundaries(self):
-        """Lean sampling must elide whole serialized records: no section between elision markers
-        may start mid-record, and every retained record must be complete — including records
-        whose body contains blank lines, which are not record delimiters."""
+        """Lean input over the bound is split into several summarizer passes on whole serialized
+        records: every record reaches exactly one pass complete, in order, with no elision —
+        including records whose body contains blank lines, which are not record delimiters.
+        Input below the bound stays one call."""
         compressor = ContextCompressor(
             model="test/model", threshold_percent=0.85, protect_first_n=2, protect_last_n=2,
             quiet_mode=True, tail_mode="lean",
@@ -3151,26 +3152,30 @@ class TestSummaryPromptBounding:
         telemetry = compressor._begin_compression_telemetry(current_tokens=1_000_000)
         with patch("agent.context_compressor.call_llm", return_value=resp) as mock_call:
             assert compressor._generate_summary(messages) is not None
-        assert mock_call.call_count == 1
-        prompt = "\n".join(m["content"] for m in mock_call.call_args.kwargs["messages"])
-        assert "chars elided" in prompt
+        assert mock_call.call_count > 1
 
-        # Each retained record is a whole user turn in its own role (#146750), never a fragment.
-        transcript = "\n\n".join(m["content"] for m in mock_call.call_args.kwargs["messages"][1:-1] if m["role"] == "user")
-        transcript = transcript[transcript.index("record-"):]
-        whole = ["[USER]: " + r for r in re.findall(r"record-\d{4} " + re.escape(body) + r"(?=\n\nrecord-|\n\n\[|$)", transcript)]
-        assert len(whole) == transcript.count("record-") > 8
-        # Newest record anchors the tail and both ends of the history are represented.
-        assert whole[-1].startswith("[USER]: record-1199 ")
-        assert whole[0].startswith("[USER]: record-0000 ")
-        # Coverage telemetry describes exactly what the prompt shows, in records and record chars.
+        # Each record is a whole user turn in its own role (#146750), never a fragment, in one pass.
+        seen = []
+        for call in mock_call.call_args_list:
+            call_messages = call.kwargs["messages"]
+            prompt = "\n".join(m["content"] for m in call_messages)
+            assert "chars elided" not in prompt
+            transcript = "\n\n".join(m["content"] for m in call_messages[1:-1] if m["role"] == "user")
+            transcript = transcript[transcript.index("record-"):]
+            whole = re.findall(r"record-(\d{4}) " + re.escape(body) + r"(?=\n\nrecord-|\n\n\[|$)", transcript)
+            assert len(whole) == transcript.count("record-") > 0
+            seen.extend(int(i) for i in whole)
+        assert seen == list(range(1200))
+        # Coverage telemetry sums all passes: every record and every record char is shown.
         assert telemetry["summary_input_record_count"] == 1200
-        assert telemetry["summary_input_sampled_record_count"] == len(whole)
-        assert telemetry["summary_input_elided_record_count"] == 1200 - len(whole)
-        assert telemetry["summary_input_sampled_chars"] == sum(map(len, whole))
-        assert telemetry["summary_input_chars"] == (
-            telemetry["summary_input_sampled_chars"] + telemetry["summary_input_omitted_chars"]
-        )
+        assert telemetry["summary_input_sampled_record_count"] == 1200
+        assert telemetry["summary_input_elided_record_count"] == 0
+        assert telemetry["summary_input_omitted_chars"] == 0
+        assert telemetry["summary_input_chars"] == telemetry["summary_input_sampled_chars"]
+
+        with patch("agent.context_compressor.call_llm", return_value=resp) as small_call:
+            assert compressor._generate_summary(messages[:10]) is not None
+        assert small_call.call_count == 1
 
     def test_lean_sampling_oversized_middle_record_does_not_evict_tail(self):
         """A record larger than one region's share is bounded inside itself, not allowed to consume
@@ -3216,8 +3221,10 @@ class TestSummaryPromptBounding:
                 assert f"{records[a]}\n\n...[records {a + 2:,}-{b:,}:" in sampled, (a, b)
 
     def test_iterative_update_path_is_bounded(self):
-        """The iterative prompt (previous summary + new turns) must be bounded
-        too — a pathological rehydrated handoff must not blow up the prompt."""
+        """Each iterative prompt (previous summary + new turns) is bounded — a pathological
+        rehydrated handoff must not blow up the prompt. New turns over the bound run in several
+        passes: pass 1 carries the previous summary, later passes carry the running summary,
+        and every turn reaches a pass. New turns below the bound stay one call."""
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
         mock_response.choices[0].message.content = "updated summary"
@@ -3235,13 +3242,29 @@ class TestSummaryPromptBounding:
         with patch("agent.context_compressor.call_llm", return_value=mock_response) as mock_call:
             summary = c._generate_summary(messages)
 
-        prompt = "\n".join(m["content"] for m in mock_call.call_args.kwargs["messages"])
         assert summary.startswith(SUMMARY_PREFIX)
-        # previous summary block + new-turns block each capped, plus the
-        # fixed template: well under 3x the cap (unbounded would be ~800K).
-        assert len(prompt) < 2 * cap + 30_000
-        assert "PREV_HEAD" in prompt
-        assert "PREV_TAIL" in prompt
+        assert mock_call.call_count > 1
+        prompts = ["\n".join(m["content"] for m in call.kwargs["messages"]) for call in mock_call.call_args_list]
+        for prompt in prompts:
+            # previous summary block + new-turns block each capped, plus the
+            # fixed template: well under 3x the cap (unbounded would be ~800K).
+            assert len(prompt) < 2 * cap + 30_000
+        assert "PREV_HEAD" in prompts[0]
+        assert "PREV_TAIL" in prompts[0]
+        for prompt in prompts[1:]:
+            assert "PREV_HEAD" not in prompt
+            assert "updated summary" in prompt
+        for i in range(80):
+            assert sum(f"turn-{i}-x" in prompt for prompt in prompts) == 1, i
+
+        c._previous_summary = "PREV_HEAD " + ("p" * (cap * 2)) + " PREV_TAIL"
+        with patch("agent.context_compressor.call_llm", return_value=mock_response) as small_call:
+            c._generate_summary(messages[:5])
+        assert small_call.call_count == 1
+        small_prompt = "\n".join(m["content"] for m in small_call.call_args.kwargs["messages"])
+        assert len(small_prompt) < 2 * cap + 30_000
+        assert "PREV_HEAD" in small_prompt
+        assert "PREV_TAIL" in small_prompt
 
     def test_marker_does_not_collide_with_summary_classifier(self):
         """The omitted-middle marker must never make bounded content classify

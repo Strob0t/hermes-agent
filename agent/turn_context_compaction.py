@@ -118,9 +118,15 @@ def _reanchor(agent: Any, messages: list[Any], user_message: Any) -> int:
     api_content stamp, injection site and persist-override row hit the same dict."""
     from agent.turn_context import reanchor_current_turn_user_idx
 
-    idx = reanchor_current_turn_user_idx(messages, user_message)
+    idx = reanchor_current_turn_user_idx(messages, user_message, durable_turn_text(agent))
     agent._persist_user_message_idx = idx
     return idx
+
+
+def durable_turn_text(agent: Any) -> Any:
+    """The persist override as an anchor text: the content the current turn's row holds once it is flushed."""
+    override = getattr(agent, "_persist_user_message_override", None)
+    return override if isinstance(override, str) and override else None
 
 
 # ── Turn-start passes ──
@@ -131,13 +137,20 @@ def run_turn_start_compaction(
     active_system_prompt: Optional[str], conversation_history: Optional[list[dict[str, Any]]],
     current_turn_user_idx: int, user_message: Any, effective_task_id: str,
 ) -> CompactionOutcome:
-    """Idle compaction, then preflight compression (or the uncompressed guard)."""
+    """Idle compaction, preflight compression (or the uncompressed guard), then the cold-cache prune."""
     out = CompactionOutcome(
         messages=messages, active_system_prompt=active_system_prompt,
         conversation_history=conversation_history, current_turn_user_idx=current_turn_user_idx,
     )
+    # ctx-window patch: the compressor of this new agent starts with the window of the alias row; use the window
+    # of the model that served the session last
+    from agent.served_model import apply_session_window
+    apply_session_window(agent)
     _idle_compaction(agent, out, system_message, user_message, effective_task_id)
     _preflight_compression(agent, out, system_message, user_message, effective_task_id)
+    from agent.turn_proactive_prune import turn_start_cold_prune
+
+    turn_start_cold_prune(agent, out, effective_task_id)
     return out
 
 

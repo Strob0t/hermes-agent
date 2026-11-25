@@ -12,28 +12,57 @@ from __future__ import annotations
 import logging
 import random
 import sys
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any, Dict, List, Tuple
 
 from agent.display import KawaiiSpinner
 from agent.interrupt_control import interrupt_issuer, interrupted_during_api_call_reason
-from agent.turn_context_compaction import _reanchor
+from agent.turn_context_compaction import _reanchor, durable_turn_text
 from agent.turn_truncation import boosted_output_cap
 
 logger = logging.getLogger("agent.conversation_loop")
 
+# Upper bound for ``agent.rate_limit_tail_wait_seconds``: the wait holds the turn lease.
+_RATE_LIMIT_TAIL_WAIT_MAX_S = 60.0
 
-def _anchors_current_turn(messages: Any, idx: Any, user_message: Any) -> bool:
+
+def rate_limit_tail_wait_seconds() -> float:
+    """``agent.rate_limit_tail_wait_seconds`` clamped to [0, 60]; 0 (default) or a bad value = off."""
+    try:
+        from hermes_cli.config import load_config_readonly
+        section = (load_config_readonly() or {}).get("agent") or {}
+        value = float(section.get("rate_limit_tail_wait_seconds", 0) or 0)
+    except Exception:
+        return 0.0
+    if value != value or value <= 0:
+        return 0.0
+    return min(value, _RATE_LIMIT_TAIL_WAIT_MAX_S)
+
+
+def _wait_rate_limit_cooldown(agent: Any, wait_s: float) -> bool:
+    """Sleep ``wait_s`` in 0.2 s steps; return False at once when an interrupt is requested."""
+    wake_at = time.monotonic() + wait_s
+    while True:
+        if getattr(agent, "_interrupt_requested", False):
+            return False
+        remaining = wake_at - time.monotonic()
+        if remaining <= 0:
+            return True
+        time.sleep(min(0.2, remaining))
+
+
+def _anchors_current_turn(messages: Any, idx: Any, user_message: Any, durable_text: Any = None) -> bool:
     """True when ``messages[idx]`` is this turn's user row (verbatim, or its user-originated view)."""
     if not isinstance(idx, int) or not 0 <= idx < len(messages):
         return False
     msg = messages[idx]
     if not (isinstance(msg, dict) and msg.get("role") == "user"):
         return False
-    if msg.get("content") == user_message:
+    if msg.get("content") == user_message or (durable_text is not None and msg.get("content") == durable_text):
         return True
-    from agent.context_compressor import user_originated_turn_view
+    from session_rules.turns import user_originated_turn_view
 
     view = user_originated_turn_view(msg)
     return view is not None and view.get("content") == user_message
@@ -245,7 +274,8 @@ def prepare_iteration(
     # tool rows: prefix canonicalization then drops the assistant tool_call whose result fell past the
     # split, the orphaned result is sanitized away, and the model silently loses tool output that
     # state.db still holds. A valid index always lands on this turn's user row; re-anchor otherwise.
-    if user_message is not None and not _anchors_current_turn(messages, current_turn_user_idx, user_message):
+    if user_message is not None and not _anchors_current_turn(
+            messages, current_turn_user_idx, user_message, durable_turn_text(agent)):
         _reanchored_idx = _reanchor(agent, messages, user_message)
         request_logger.info(
             "Re-anchored stale current_turn_user_idx %s -> %s (session=%s)",
@@ -432,6 +462,7 @@ class RetryRestartVerdict:
     api_call_count: Any
     _preflight_compression_blocked: Any
     _turn_exit_reason: Any
+    _rate_limit_tail_wait_used: Any = False
 
 
 def apply_retry_restarts(
@@ -440,6 +471,7 @@ def apply_retry_restarts(
     final_response: Any, retry_count: Any, max_retries: Any, api_call_count: Any,
     restart_count: Any, length_continue_retries: Any,
     _preflight_compression_blocked: Any, _turn_exit_reason: Any,
+    _rate_limit_tail_wait_used: Any = False,
 ) -> RetryRestartVerdict:
     """Consume the ``TurnRetryState`` restart flags after the retry loop, in the original
     priority order. Refunds the iteration budget/count for restarts that produced no valid
@@ -462,6 +494,7 @@ def apply_retry_restarts(
             api_call_count=api_call_count,
             _preflight_compression_blocked=_preflight_compression_blocked,
             _turn_exit_reason=_turn_exit_reason,
+            _rate_limit_tail_wait_used=_rate_limit_tail_wait_used,
         )
 
     if _retry.restart_with_redirected_messages:
@@ -525,6 +558,32 @@ def apply_retry_restarts(
     if _retry.restart_with_rebuilt_messages:
         restart_count += 1
         if restart_count > max_retries:
+            # Opt-in, one grant per turn: a short armed rate-limit cooldown is waited out once,
+            # then the primary is restored and the iteration re-issued (the manual remedy is
+            # "send continue"). A second rate limit in the same turn ends the turn as before.
+            cooldown_s = (getattr(agent, "_rate_limited_until", 0) or 0) - time.monotonic()
+            limit_s = rate_limit_tail_wait_seconds() if not _rate_limit_tail_wait_used and cooldown_s > 0 else 0.0
+            if 0 < cooldown_s <= limit_s:
+                _rate_limit_tail_wait_used = True
+                logger.info(
+                    "Rebuilt-message restart limit (%s) reached with a %.0f s rate-limit cooldown armed: "
+                    "waiting it out once (limit %.0f s), then re-issuing the iteration.",
+                    max_retries, cooldown_s, limit_s,
+                )
+                with suppress(Exception):
+                    agent._emit_diagnostic_status(f"⏳ All providers rate-limited; retrying once in ~{cooldown_s:.0f}s.")
+                with suppress(Exception):
+                    agent._touch_activity(f"rate-limit tail wait, {cooldown_s:.0f}s")
+                if not _wait_rate_limit_cooldown(agent, cooldown_s):
+                    _turn_exit_reason = interrupted_during_api_call_reason(agent)
+                    return _verdict("break")
+                with suppress(Exception):
+                    agent._restore_primary_runtime()
+                api_call_count -= 1
+                agent.iteration_budget.refund()
+                _retry.restart_with_rebuilt_messages = False
+                _preflight_compression_blocked = False
+                return _verdict("continue")
             # A stall/failure keeps re-escalating to the fallback chain: stop refunding the
             # iteration budget and re-issuing, or a runaway turn holds the turn lease
             # indefinitely (rebuilt restarts previously had no bound).

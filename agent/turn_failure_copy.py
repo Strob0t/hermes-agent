@@ -15,16 +15,20 @@ from typing import Any, Dict, NamedTuple, Optional, Tuple
 from agent.error_classifier import FailoverReason
 from agent.stream_max_lifetime import StreamLifetimeExceeded
 from hermes_constants import display_hermes_home
+from persistence.conversation.messages import (
+    CONTENT_REFUSED_DISPLAY_KIND, CONTENT_REFUSED_METADATA_KEY, CONTENT_REFUSED_NOTICE,
+)
 
 # Failure codes minted by loop sites that are not provider verdicts (see module docstring).
 SITE_FAILURE_CODES = frozenset({
     "context_overflow", "truncated", "invalid_response", "empty_response", "loop_error",
     "interpreter_shutdown", "session_busy", "gateway_connection", "host_error",
+    "malformed_tool_call",
 })
 
 
 def launch_credentials_copy(error: Any) -> str:
-    """The refusal for a session whose own launch/route API key changed or is gone (``RuntimeStoreError``
+    """The refusal for a session whose own launch/route API key changed or is gone (``AuthorityRefusal``
     or an RPC refusal carrying ``field``/``detail``). A session never sends a different key than it
     started with, so /retry repeats the refusal: the copy names /new on every surface."""
     from agent.i18n import t
@@ -82,12 +86,8 @@ FAILED_TURN_DISPLAY_KIND = "failed_turn"
 # SEEING their message: the user row is retained in the DISPLAY projection (never the model read)
 # and tagged with this display_kind, while the raw tool rounds + refusal detail collapse into
 # CONTENT_REFUSED_NOTICE. Rendered cross-surface (Desktop, CLI/TUI, ACP) as a greyed block.
-CONTENT_REFUSED_DISPLAY_KIND = "content_refused"
-CONTENT_REFUSED_NOTICE = (
-    "This message was refused by the model's safety filter — try a different query."
-)
-# messages.display_metadata key carrying the stored notice, so every surface renders one copy.
-CONTENT_REFUSED_METADATA_KEY = "content_refused"
+# The kind, the notice and the display_metadata key are the stored row shape the store's retention
+# and open-time repair write, so they are defined once, in the transcript contract (imported above).
 
 
 def untyped_failed_turn_display_kind(role: Any, content: Any) -> Optional[str]:
@@ -335,6 +335,11 @@ _FAILURE_CODE_COPY: dict[str, str] = {
         "This conversation has grown too long for {model} to read, and Hermes couldn't shrink "
         "it enough automatically. Start a new session with /new (your history is kept), or try "
         "/compress once more. Switching to a model with a bigger context window also works."
+    ),
+    "malformed_tool_call": (
+        "{model} kept sending tool calls whose arguments were not valid JSON objects, so none of "
+        "them ran, even after being shown the error. Nothing was changed. Switch to a different "
+        "model with /model, or ask for the work in smaller steps."
     ),
     "truncated": (
         "The model's reply was cut off before it finished (it hit its output length limit), so "

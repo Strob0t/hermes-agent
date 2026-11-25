@@ -26,7 +26,7 @@ COSTED = {**UNTRUSTED, "tool_costs": {"sync": 40}, "spend_limit": 100}
 HTTP_UNTRUSTED = {"trust": "untrusted", "url": "https://mcp.example.test/mcp"}
 
 
-def _run_on_loop(coro_or_factory, timeout=30):
+def _run_on_loop(coro_or_factory, timeout=30, **_kwargs):
     coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
     loop = asyncio.new_event_loop()
     try:
@@ -248,7 +248,7 @@ def test_call_arriving_while_a_reconnect_lists_tools_is_refused_and_refunded():
         task.session = new
         await task._discover_tools()
 
-    def run_on_loop(coro_or_factory, timeout=30):
+    def run_on_loop(coro_or_factory, timeout=30, **_kwargs):
         future = asyncio.run_coroutine_threadsafe(
             coro_or_factory() if callable(coro_or_factory) else coro_or_factory, loop)
         scheduled.set()

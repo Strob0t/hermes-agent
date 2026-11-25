@@ -20,7 +20,7 @@ from tools import mcp_tool_handlers as _mcp_handlers
 from tools import mcp_tool_registration as _mcp_registration
 
 
-def _run_on_loop(coro_or_factory, timeout=30):
+def _run_on_loop(coro_or_factory, timeout=30, **_kwargs):
     coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
     loop = asyncio.new_event_loop()
     try:

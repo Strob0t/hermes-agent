@@ -45,9 +45,9 @@ class TestShouldCompressInfo:
 
     def test_cooldown_reports_reason(self):
         comp = _make_compressor()
-        comp.last_prompt_tokens = comp.last_real_prompt_tokens = 73_000
+        comp.last_prompt_tokens = comp.last_real_prompt_tokens = comp.threshold_tokens + 1_000  # fork: trigger curve raises above the upstream floor (z7)
         comp._summary_failure_cooldown_until = time.monotonic() + 60
-        should, reason = comp.should_compress_info(73_000)
+        should, reason = comp.should_compress_info(comp.threshold_tokens + 1_000)  # fork: trigger curve raises above the upstream floor (z7)
         assert should is False
         assert reason is not None
         assert reason.startswith("cooldown:")
@@ -101,7 +101,8 @@ def _run_build(agent):
     ``tests/agent/test_over_window_compression_fail_closed.py``)."""
     with patch("agent.auxiliary_client.set_runtime_main", lambda *a, **k: None), \
          patch("agent.turn_context._should_run_preflight_estimate", return_value=True), \
-         patch("agent.turn_context.estimate_request_tokens_rough", return_value=80_000):
+         patch("agent.turn_context.estimate_request_tokens_rough",
+               return_value=agent.context_compressor.threshold_tokens + 1_000):  # fork: trigger curve raises above the upstream floor (z7)
         return build_turn_context(
             agent=agent,
             user_message="hello",
@@ -123,7 +124,7 @@ def _run_build(agent):
 class TestTurnContextOverflowWarning:
     def test_warns_on_cooldown_block(self):
         comp = _make_compressor()
-        comp.last_prompt_tokens = comp.last_real_prompt_tokens = 73_000
+        comp.last_prompt_tokens = comp.last_real_prompt_tokens = comp.threshold_tokens + 1_000  # fork: trigger curve raises above the upstream floor (z7)
         comp._summary_failure_cooldown_until = time.monotonic() + 30
         agent = _build_warn_agent(comp)
         _run_build(agent)
@@ -143,7 +144,7 @@ class TestTurnContextOverflowWarning:
         cooldown timer moves.
         """
         comp = _make_compressor()
-        comp.last_prompt_tokens = comp.last_real_prompt_tokens = 73_000
+        comp.last_prompt_tokens = comp.last_real_prompt_tokens = comp.threshold_tokens + 1_000  # fork: trigger curve raises above the upstream floor (z7)
         comp._summary_failure_cooldown_until = time.monotonic() + 30
         agent = _build_warn_agent(comp)
         # Turn 1: over threshold + cooldown -> warn.

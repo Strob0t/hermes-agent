@@ -32,7 +32,8 @@ from agent.display import (
 )
 from agent.compression_marker import _COMPRESSION_MARKER_PREFIX
 from agent.interrupt_control import _REASON_USER_INTERRUPT, interrupt_skip_wording
-from agent.message_sanitization import coalesce_tool_call_id
+from agent.tool_rejection import CANCELLED_STATUS, outcome_result
+from session_rules.turns import coalesce_tool_call_id
 from agent.onboarding import observe_tool_result as observe_onboarding_result
 from agent import plugin_live_notes
 from agent.lsp import deferred as lsp_deferred
@@ -49,15 +50,10 @@ from agent.inline_tool_executors import (
 from agent.message_metadata import stamp_data_use
 from agent.session_persistence import sync_rewritten_tool_rows
 from agent.tool_dispatch_helpers import (
-    _NEVER_PARALLEL_TOOLS,
-    _is_destructive_command,
-    _is_multimodal_tool_result,
-    _multimodal_text_summary,
-    _append_subdir_hint_to_multimodal,
-    _context_pruned_argument_paths,
-    _plan_tool_batch_segments,
-    make_tool_result_message,
+    _NEVER_PARALLEL_TOOLS, _is_destructive_command, _append_subdir_hint_to_multimodal,
+    _context_pruned_argument_paths, _plan_tool_batch_segments, make_tool_result_message,
 )
+from session_rules.turns import _is_multimodal_tool_result, _multimodal_text_summary
 from tools.terminal_tool_lifecycle import get_active_env
 from tools.thread_context import propagate_context_to_thread
 from tools.tool_result_storage import (
@@ -66,6 +62,7 @@ from tools.tool_result_storage import (
     extract_persisted_path,
 )
 from tools.budget_config import BudgetConfig, DEFAULT_BUDGET, budget_for_context_window
+from tools.tool_result_compaction import compact_tool_result
 from hermes_cli.observability.shared_metrics_efficiency import note_tool_result, record_tool_batch
 
 # A tool result this large (raw stdout, file dumps) is the biggest allocation a turn ever drops.
@@ -221,7 +218,7 @@ def _flush_session_db_after_tool_progress(agent, messages: list, *, stage: str) 
         return persisted
     except Exception as exc:
         agent._incremental_persistence_failed = True
-        from hermes_state import classify_persistence_error
+        from storage_errors import classify_persistence_error
         agent._last_persistence_error_cause = classify_persistence_error(exc)
         logger.warning("Incremental tool-call persistence failed after %s: %s", stage, exc)
         return False
@@ -346,7 +343,8 @@ def _append_skipped_tool_results(
     append and returns False on the first failed flush when ``stop_on_flush_failure``."""
     for tc in tool_calls:
         name = _tc_name(tc)
-        result = content.replace("{name}", name)
+        # Not a tool output: the ``cancelled`` status lets the compressor summarize the call as not run.
+        result = outcome_result(CANCELLED_STATUS, content.replace("{name}", name))
         messages.append(make_tool_result_message(name, result, _pairing_tool_call_id(tc), effect_disposition="none"))
         if hook_error_type is not None:
             _ToolCallRef(name, {}, effective_task_id, (hook_id or _pairing_tool_call_id)(tc), []).emit_post(
@@ -879,7 +877,11 @@ _SEQUENTIAL_DEADLINE_EXEMPT_TOOLS = frozenset({"delegate_task", "manage_connecti
 
 def _abandoned_sequential_result(agent, ref: _ToolCallRef, message: str, result_cls, **outcome) -> _ManagedToolResult:
     """Emit the terminal post_tool_call for a worker the sequential runner gave up on
-    (timeout / interrupt) and wrap ``message`` in its marker ``result_cls``."""
+    (timeout / interrupt) and wrap ``message`` in its marker ``result_cls``. An abandoned call
+    carries the ``cancelled`` status; a timeout keeps its plain ``Error executing tool`` text,
+    which the ACP adapter detects as a failure."""
+    if result_cls is _ToolCancelledResult:
+        message = outcome_result(CANCELLED_STATUS, message)
     ref.emit_post(agent, message, **outcome)
     return _ManagedToolResult(result=result_cls(message), args=ref.args, middleware_trace=ref.trace, blocked=False, dispatched=True)
 
@@ -1152,6 +1154,7 @@ def _commit_tool_result(
             env=get_active_env(effective_task_id),
             config=budget,
         )
+        persisted_result = compact_tool_result(persisted_result, function_name)
     _record_persisted_path_for_stub(agent, tool_call_id, persisted_result)
     note_tool_result(agent, function_name, tool_call_id, function_result, persisted_result)
 
@@ -1549,7 +1552,7 @@ def _unfinished_tool_result(agent, ref: _ToolCallRef, *, timed_out: bool, timeou
         tool_duration, effect_disposition = float(timeout_s or 0.0), "unknown"
     elif agent._interrupt_requested:
         why = interrupt_skip_wording(agent)
-        function_result = f"[Tool execution cancelled — {ref.name} was skipped. {why}]"
+        function_result = outcome_result(CANCELLED_STATUS, f"[Tool execution cancelled — {ref.name} was skipped. {why}]")
         outcome = dict(status="cancelled", error_type="keyboard_interrupt", error_message=f"Tool execution cancelled. {why}")
         tool_duration, effect_disposition = 0.0, None
     else:

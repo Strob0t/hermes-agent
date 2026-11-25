@@ -14,9 +14,9 @@ import time
 from typing import Any, Dict, List, Optional
 
 from agent.tool_dispatch_helpers import make_tool_result_message
+from agent.tool_rejection import CANCELLED_STATUS, UNKNOWN_STATUS, outcome_result
 from agent.tool_result_classification import tool_may_have_side_effect
-from agent.message_metadata import drop_typed_ask
-from agent.turn_context import drop_stale_api_content
+from session_rules.turns import drop_stale_api_content, drop_typed_ask
 from hermes_cli.timefmt import coerce_epoch
 
 logger = logging.getLogger(__name__)
@@ -73,10 +73,12 @@ def _any_side_effecting(calls: list[dict[str, Any]]) -> bool:
 
 
 def _orphan_recovery(name: str, notices: tuple) -> tuple:
-    """(effect_disposition, content) for an interrupted/dangling call named ``name``."""
+    """(effect_disposition, content) for an interrupted/dangling call named ``name``. The notice
+    carries the structured status (unknown effect / cancelled read-only) so the compressor
+    summarizes the call as not run instead of as a successful run."""
     if tool_may_have_side_effect(name):
-        return "unknown", notices[0]
-    return "none", notices[1]
+        return "unknown", outcome_result(UNKNOWN_STATUS, notices[0])
+    return "none", outcome_result(CANCELLED_STATUS, notices[1])
 
 
 def strip_interrupted_tool_tails(agent_history: list[dict[str, Any]]) -> list[dict[str, Any]]:

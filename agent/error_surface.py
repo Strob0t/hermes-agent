@@ -42,6 +42,7 @@ _REASON_TO_LAYER = {
     "local_runtime_unavailable": LAYER_ENDPOINT,  # the managed local model server is down
     "truncated": LAYER_PROVIDER, "empty_response": LAYER_PROVIDER, "invalid_response": LAYER_PROVIDER,
     "context_overflow": LAYER_PROVIDER,  # a bigger-window model IS the fix, so Switch provider applies
+    "malformed_tool_call": LAYER_PROVIDER,  # the model cannot emit valid arguments; another model can
 }
 
 # Failures between us and the base_url (not a provider verdict); on a
@@ -57,7 +58,7 @@ _FREE_TIER_RETRYABLE_KINDS = {"rate_limited", "at_capacity", "outage"}
 _NON_RETRYABLE_REASONS = {
     "auth", "auth_permanent", "billing", "billing_unverified", "content_policy_blocked",
     "provider_policy_blocked", "data_policy_denied", "model_not_found", "format_error", "ssl_cert_verification",
-    "context_overflow", "interpreter_shutdown", "upstream_blocked", "guardrail_blocked",
+    "context_overflow", "interpreter_shutdown", "upstream_blocked", "guardrail_blocked", "malformed_tool_call",
 }
 
 # Providers whose base_url is user-supplied rather than a known vendor.
@@ -140,7 +141,7 @@ def auth_kind(provider: Optional[str]) -> str:
 
 def _disk_full(candidate: Any) -> bool:
     try:
-        from hermes_state_errors import is_disk_full_error
+        from storage_errors import is_disk_full_error
 
         return bool(is_disk_full_error(candidate))
     except Exception:  # pragma: no cover - defensive import guard
@@ -169,7 +170,7 @@ def build_error_surface_from_result(result: Any, provider: str = "", model: str 
         if not error_text and not reason:
             return None
         # Disk-full wins outright: the fix (free space) is unrelated to the
-        # provider stack; hermes_state owns the pattern list.
+        # provider stack; storage_errors owns the pattern list.
         if error_text and _disk_full(error_text):
             return _surface(LAYER_DISK, "disk_full", False, provider, model)
         if result.get("billing_block") or reason in ("billing", "billing_unverified"):

@@ -149,7 +149,7 @@ class TestNativeImageAttach:
         server._tools = [SimpleNamespace(name="snap", description="screenshot", inputSchema=None)]
         server.session = SimpleNamespace(call_tool=AsyncMock(return_value=result))
 
-        def run(factory, timeout=30):
+        def run(factory, timeout=30, **_kwargs):
             async def go():
                 server._rpc_lock = asyncio.Lock()
                 return await factory()

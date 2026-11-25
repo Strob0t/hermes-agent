@@ -1874,7 +1874,7 @@ class TestMoAContextLength:
             )
 
         assert compressor.context_length == configured_context
-        assert compressor.threshold_tokens == configured_context // 2
+        assert compressor.threshold_tokens == int(configured_context * ContextCompressor._effective_threshold_percent(configured_context, 0.50))  # fork: trigger curve raises above the upstream floor (z7)
         endpoint_probe.assert_not_called()
 
 

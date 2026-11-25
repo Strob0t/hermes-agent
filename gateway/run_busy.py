@@ -125,6 +125,43 @@ class GatewayBusySessionMixin:
             pending_slot[session_key] = queued_event
         queued_event._gateway_accepted = True
 
+    def _enqueue_user_ahead_of_internal(
+        self, session_key: str, event: MessageEvent, adapter: Any, existing: MessageEvent
+    ) -> bool:
+        """Place real user input ahead of queued internal events; True when it was enqueued.
+
+        Internal events (goal continuations, wakes, process notifications) queue without
+        interrupting a busy turn, so one can already hold the head slot when the user sends a
+        follow-up. Order within each class is kept, so the queue stays partitioned as
+        [user..., internal...]. At the cap the oldest internal event is shed instead of the user input.
+        """
+        at_cap = self._queue_depth(session_key, adapter=adapter) >= self._BUSY_QUEUE_MAX_PENDING
+        overflow = self._session_state(session_key).conversation.queued_events
+        if getattr(existing, "internal", False):
+            if at_cap:
+                logger.warning(
+                    "Replacing queued internal event with user input for session %s — "
+                    "pending queue at cap (%d).", session_key, self._BUSY_QUEUE_MAX_PENDING,
+                )
+            else:
+                overflow.insert(0, existing)
+            adapter._pending_messages[session_key] = event
+        else:
+            internal_idx = [i for i, queued in enumerate(overflow) if getattr(queued, "internal", False)]
+            if not internal_idx:
+                return False
+            first = internal_idx[0]
+            if at_cap:
+                logger.warning(
+                    "Dropping oldest queued internal event for user input in session %s — "
+                    "pending queue at cap (%d).", session_key, self._BUSY_QUEUE_MAX_PENDING,
+                )
+                overflow.pop(first)
+            overflow.insert(first, event)
+        event._gateway_accepted = True
+        logger.info("Prioritized user input ahead of queued internal events for session %s.", session_key)
+        return True
+
     def _promote_queued_event(
         self, session_key: str, adapter: Any, pending_event: Optional[MessageEvent]
     ) -> Optional[MessageEvent]:
@@ -468,12 +505,11 @@ class GatewayBusySessionMixin:
             return False
         except Exception:
             return _assume_active("session", session_key)
-        session_db = getattr(self, "_session_db", None)
-        if not session_id or session_db is None:
+        store = getattr(self, "persistence", None)
+        if not session_id or store is None:
             return False
-        raw_db = getattr(session_db, "_db", session_db)
         try:
-            holder = await asyncio.to_thread(raw_db.get_compression_lock_holder, str(session_id))
+            holder = await asyncio.to_thread(store.coordination.get_compression_lock_holder, session_id=str(session_id))
             # Production returns Optional[str]. Reject non-strings so a MagicMock auto-attr (or any
             # unexpected truthy) cannot look like a held lock and skip hygiene.
             # See #96953.
@@ -542,6 +578,10 @@ class GatewayBusySessionMixin:
             )
             event._gateway_accepted = True
             return
+
+        if existing is not None and not getattr(event, "internal", False):
+            if self._enqueue_user_ahead_of_internal(session_key, event, adapter, existing):
+                return
 
         if self._queue_depth(session_key, adapter=adapter) >= self._BUSY_QUEUE_MAX_PENDING:
             logger.warning(

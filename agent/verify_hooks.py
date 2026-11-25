@@ -14,6 +14,7 @@ from typing import Any, Optional
 from utils import is_truthy_value
 
 DEFAULT_MAX_VERIFY_NUDGES = 3
+DEFAULT_MAX_STOP_CONTINUATIONS = 20  # local patch: default bound for the generic pre_stop gate
 
 # Appended to the verification-stop nudge when code lacks fresh evidence. Mirrors
 # the user-facing "clean your work" workflow without adding its own model turn.
@@ -32,6 +33,14 @@ def max_verify_nudges(config: Optional[dict[str, Any]] = None) -> int:
         return max(0, int(_agent_cfg(config).get("max_verify_nudges")))
     except (TypeError, ValueError):
         return DEFAULT_MAX_VERIFY_NUDGES
+
+
+def max_stop_continuations(config: Optional[dict[str, Any]] = None) -> int:
+    """local patch: bound on consecutive ``pre_stop`` continue directives per turn (>= 0)."""
+    try:
+        return max(0, int(_agent_cfg(config).get("max_stop_continuations")))
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_STOP_CONTINUATIONS
 
 
 def coding_verify_guidance(config: Optional[dict[str, Any]] = None) -> Optional[str]:
@@ -53,4 +62,5 @@ def _agent_cfg(config: Optional[dict[str, Any]]) -> dict[str, Any]:
     return agent_cfg if isinstance(agent_cfg, dict) else {}
 
 
-__all__ = ["CODING_VERIFY_GUIDANCE", "DEFAULT_MAX_VERIFY_NUDGES", "coding_verify_guidance", "max_verify_nudges"]
+__all__ = ["CODING_VERIFY_GUIDANCE", "DEFAULT_MAX_STOP_CONTINUATIONS", "DEFAULT_MAX_VERIFY_NUDGES",
+           "coding_verify_guidance", "max_stop_continuations", "max_verify_nudges"]

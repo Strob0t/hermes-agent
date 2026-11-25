@@ -179,13 +179,13 @@ def test_unclamp_clears_stale_clamp_warning():
     agent._config_context_length = None
     agent._compression_feasibility_checked = True
     client = MagicMock(base_url="http://localhost/v1", api_key="test-key")
-    for main_ctx, aux_ctx, label in ((1_000_000, 80_000, "big"), (100_000, 80_000, "small")):
+    for main_ctx, aux_ctx, label in ((1_000_000, 80_000, "big"), (90_000, 80_000, "small")):  # fork: trigger curve raises above the upstream floor (z7)
         agent.model = label
         with patch("agent.auxiliary_client.get_text_auxiliary_client", return_value=(client, "aux")), \
              patch("agent.model_metadata.get_model_context_length", side_effect=[main_ctx, aux_ctx]):
             _update_fallback_context_compressor(agent)
     assert compressor._aux_context_ceiling is None
-    assert compressor.threshold_tokens == 75_000
+    assert compressor.threshold_tokens == int(90_000 * ContextCompressor._effective_threshold_percent(90_000, 0.50))  # fork: trigger curve raises above the upstream floor (z7)
     assert agent._compression_warning is None
     assert agent._last_feasibility_notice is None
 
@@ -432,7 +432,7 @@ def test_auto_corrects_threshold_when_aux_context_below_threshold(mock_get_clien
     # 75% and ignored (#67422), so the message must not offer one and must
     # explain the recomputed trigger instead (0.75 * 200K = 150K).
     assert "threshold:" not in messages[0]
-    assert "150,000" in messages[0]
+    assert "156,923" in messages[0]  # fork: trigger curve raises above the upstream floor (z7)
     # Warning stored for gateway replay
     assert agent._compression_warning is not None
     # Threshold on the live compressor was actually lowered to aux_context.

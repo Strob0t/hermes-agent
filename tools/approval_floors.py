@@ -45,8 +45,9 @@ def _match_user_deny_rule(command: str) -> str | None:
 
 
 def _user_deny_block_result(pattern: str) -> dict:
-    """Build the standard block result for an ``approvals.deny`` match."""
-    return {"approved": False, "user_deny": True, "message": (
+    """Build the standard block result for an ``approvals.deny`` match. ``status: rejected``
+    marks the call as never run and forbidden, unlike a ``blocked`` call the user may still approve."""
+    return {"approved": False, "user_deny": True, "status": "rejected", "message": (
         f"BLOCKED: this command matches the user-defined deny rule "
         f"'{pattern}' (approvals.deny in config.yaml). It cannot be "
         "executed via the agent — not even with --yolo, /yolo, or "

@@ -821,6 +821,7 @@ class OpenAICompatRoutesMixin:
                 result = (fut.result() or (None,))[0]
                 status = terminal_run_status(result)[0] if isinstance(result, dict) else "completed"
             self._set_run_status(completion_id, status)
+            self._stopping_run_ids.discard(completion_id)
             self._release_run_owner_if_forgotten(completion_id)
         return _approval_notify, _on_done
 
@@ -915,8 +916,8 @@ class OpenAICompatRoutesMixin:
                 return _invalid_request("Session ID too long")
             session_id = provided_session_id
             try:
-                db = await self._ensure_session_db_async()
-                if db is not None:
+                store = self._store_beside(await self._ensure_store_async())
+                if store is not None:
                     # #98619/#13437: a client-addressed id from before a compression rotation
                     # must adopt the live continuation tip — history loads from it, the turn and
                     # the wake target bind it, and a detached delegation delivery row persisted
@@ -924,7 +925,7 @@ class OpenAICompatRoutesMixin:
                     # the delivery writer (gateway/wake.py) and /v1/runs use; fails open.
                     from gateway.platforms.api_server_runs import _resolve_live_session_id
                     session_id = await _resolve_live_session_id(self, provided_session_id)
-                    history = await asyncio.to_thread(db.get_messages_as_conversation, session_id)
+                    history = [m.as_openai_message() for m in await store.aio.messages.read_conversation(session_id)]
             except Exception as e:
                 logger.warning("Failed to load session history for %s: %s", session_id, e)
                 history = []
@@ -961,8 +962,15 @@ class OpenAICompatRoutesMixin:
         # above still applies; it grants no internal ingress or control authority.
         if provided_session_id and body.get("hermes_notification_category") == "diagnostic":
             run_kwargs["notification_category"] = "diagnostic"
+        # local patch: a gateway wake self-post (gateway/wake.py) is no client message; the flag
+        # only removes the api_inbound tag of the user row, so a client that sends it gains nothing.
+        if provided_session_id and body.get("hermes_wake") is True:
+            run_kwargs["wake_turn"] = True
         if stream:
             _stream_q = ThreadSafeAsyncQueue()
+            runner = getattr(self, "gateway_runner", None)
+            admission_future = (asyncio.get_running_loop().create_future()
+                                if getattr(runner, "session_authority", None) is not None else None)
             # tool_call_ids with an emitted "running": a "completed" without one (internal/
             # filtered tools) is dropped rather than orphaned on the wire.
             _started_tool_call_ids: set[str] = set()
@@ -991,10 +999,15 @@ class OpenAICompatRoutesMixin:
             # turn ends (POST /v1/runs/{id}/approval then answers 409) and sets the terminal status.
             approval_notify, end_stream_run = self._register_stream_approval(
                 request, completion_id, _stream_q, session_id)
-            agent_task, agent_ref = self._spawn_stream_agent(
-                _stream_q, on_done=end_stream_run, tool_start_callback=_on_tool_start,
-                tool_complete_callback=_on_tool_complete, approval_notify_callback=approval_notify,
-                approval_session_key=completion_id, **run_kwargs)
+            from gateway.session_api_turn import api_admission_future
+            future_token = api_admission_future.set(admission_future)
+            try:
+                agent_task, agent_ref = self._spawn_stream_agent(
+                    _stream_q, on_done=end_stream_run, tool_start_callback=_on_tool_start,
+                    tool_complete_callback=_on_tool_complete, approval_notify_callback=approval_notify,
+                    approval_session_key=completion_id, **run_kwargs)
+            finally:
+                api_admission_future.reset(future_token)
             # #13437 identity contract: an explicit-header client keeps addressing the id it
             # sent; the response echoes that stable id while reads/writes adopt the live tip,
             # so a rotation mid-turn (after these headers are prepared) never changes what the
@@ -1003,14 +1016,14 @@ class OpenAICompatRoutesMixin:
             return await self._write_sse_chat_completion(
                 request, completion_id, model_name, created, _stream_q,
                 agent_task, agent_ref, session_id=(provided_session_id or session_id),
-                gateway_session_key=gateway_session_key)
+                gateway_session_key=gateway_session_key, admission_future=admission_future)
 
         async def _compute_completion():
             return await self._run_agent(**run_kwargs)
         outcome, err = await self._run_idempotent(
             request, body, _compute_completion, log_label="chat completions",
             fingerprint_keys=["model", "provider", "model_options", "messages", "tools", "tool_choice", "stream",
-                              "hermes_notification_category"],
+                              "hermes_notification_category", "hermes_wake"],
             route="chat_completions",
         )
         if err is not None:
@@ -1089,11 +1102,11 @@ class OpenAICompatRoutesMixin:
         if authority is None:
             return session_id, None  # admission refuses the unserved profile with its own verdict
         import sqlite3
-        from hermes_state_runtime import RuntimeStoreError
+        from persistence import STORE_FAILURES, AuthorityRefusal
         try:
-            return await asyncio.to_thread(implicit_api_session, authority.db, session_id,
+            return await asyncio.to_thread(implicit_api_session, authority.persistence, session_id,
                                            self._chat_request_id(request)), None
-        except (RuntimeStoreError, sqlite3.Error, OSError) as exc:
+        except (AuthorityRefusal, sqlite3.Error, OSError, *STORE_FAILURES) as exc:
             from gateway.platforms.api_server import _openai_error
             from gateway.platforms.api_server_authority_runs import store_error_response
             return session_id, store_error_response(_openai_error, exc)
@@ -1116,7 +1129,7 @@ class OpenAICompatRoutesMixin:
         route), folded into the key because the store keeps the fingerprint only as the slot's value.
         """
         from gateway.platforms.api_server import _error_response, _idem_cache, _make_request_fingerprint
-        from hermes_state_runtime import RuntimeStoreError
+        from persistence import AuthorityRefusal
         idempotency_key = request.headers.get("Idempotency-Key")
         try:
             # Durable /v1/runs admissions own idempotency under session authority; the in-memory
@@ -1129,7 +1142,7 @@ class OpenAICompatRoutesMixin:
             else:
                 result, usage = await compute()
             return (result, usage), None
-        except RuntimeStoreError as exc:
+        except AuthorityRefusal as exc:
             from gateway.platforms.api_server import _openai_error
             from gateway.platforms.api_server_authority_runs import store_error_response
             return None, store_error_response(_openai_error, exc)
@@ -1155,13 +1168,28 @@ class OpenAICompatRoutesMixin:
     async def _write_sse_chat_completion(
         self, request: web.Request, completion_id: str, model: str,
         created: int, stream_q, agent_task, agent_ref=None, session_id: str | None = None,
-        gateway_session_key: str | None = None) -> web.StreamResponse:
+        gateway_session_key: str | None = None, admission_future=None) -> web.StreamResponse:
         """Stream ``chat.completion.chunk`` frames from the agent's delta queue. On client
         disconnect the agent is interrupted (stops LLM calls), then its task wrapper cancelled."""
         from gateway.platforms.api_server import (
-            _abandon_agent_task, _chat_usage_payload, _redact_api_error_text, _resolve_media_to_data_urls,
-            _sse_frame)
-        response = await self._prepare_sse_response(request, session_id, gateway_session_key)
+            _chat_usage_payload, _redact_api_error_text, _resolve_media_to_data_urls, _sse_frame)
+        from gateway.platforms.api_server_authority_runs import abandon_authority_agent_task
+
+        async def _interrupt_disconnected_turn():
+            requested = await abandon_authority_agent_task(
+                self, completion_id, admission_future, agent_ref, agent_task, "SSE client disconnected")
+            if requested:
+                logger.info("SSE client disconnected; requested interruption of agent turn %s", completion_id)
+            else:
+                logger.info(
+                    "SSE client disconnected; agent turn %s ended without a new interruption request",
+                    completion_id)
+
+        try:
+            response = await self._prepare_sse_response(request, session_id, gateway_session_key)
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
+            await _interrupt_disconnected_turn()
+            raise
 
         def _chunk(delta: dict[str, Any], finish_reason=None, **extra) -> dict[str, Any]:
             return {"id": completion_id, "object": "chat.completion.chunk", "created": created,
@@ -1238,8 +1266,7 @@ class OpenAICompatRoutesMixin:
             await response.write(_sse_frame(finish_chunk))
             await response.write(b"data: [DONE]\n\n")
         except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, OSError):
-            await _abandon_agent_task(agent_ref, agent_task, "SSE client disconnected")
-            logger.info("SSE client disconnected; interrupted agent task %s", completion_id)
+            await _interrupt_disconnected_turn()
         except Exception:
             # Agent crashed mid-stream: an error chunk beats a TransferEncodingError.
             import traceback as _tb
@@ -1399,11 +1426,11 @@ class OpenAICompatRoutesMixin:
         if replayed is not None:
             return replayed
         from gateway.platforms.api_server_response_admissions import prepare_context
-        from hermes_state_runtime import RuntimeStoreError
+        from persistence import AuthorityRefusal
         try:
             context, error = await prepare_context(
                 self, request, body, gateway_session_key, durable_key, idempotency_scope, idempotency_key)
-        except RuntimeStoreError as exc:
+        except AuthorityRefusal as exc:
             from gateway.platforms.api_server import _openai_error
             from gateway.platforms.api_server_authority_runs import store_error_response
             return store_error_response(_openai_error, exc)

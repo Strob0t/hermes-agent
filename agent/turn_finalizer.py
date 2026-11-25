@@ -17,7 +17,7 @@ from agent.delegation_context import is_dispatcher_owned_worker_context
 from agent.interrupt_control import interrupted_during_api_call_reason
 from agent.turn_failure_copy import exit_reason_failure, stamp_failure
 from agent.context_compressor import _DB_PERSISTED_MARKER
-from agent.message_content import flatten_message_text
+from session_rules.turns import flatten_message_text
 from agent.message_metadata import append_message, stamp_message_timestamp
 from agent.message_sanitization import _sanitize_surrogates
 from agent.review_signals import build_review_signals, skill_review_due
@@ -443,9 +443,13 @@ def _explain_abnormal_exit(agent, final_response, _turn_exit_reason, preserved_v
             and _stripped[-1:] not in _SENTENCE_END
         )
         if _is_empty_terminal or _is_partial_fragment or str(_turn_exit_reason) == "partial_stream_recovery":
+            from agent.agent_init_session import agent_interface
+            from persistence_assembly import store_location
+            _store = agent_interface(agent)
             _explanation = agent._format_turn_completion_explanation(
                 _turn_exit_reason, getattr(agent, "_last_persistence_error_cause", None),
-                db_path=getattr(getattr(agent, "_session_db", None), "db_path", None),
+                db_path=(store_location(_store.scope) if _store is not None
+                         else getattr(getattr(agent, "_session_db", None), "db_path", None)),
                 model=str(getattr(agent, "model", "") or ""),
             )
             if _explanation:
@@ -542,6 +546,13 @@ def apply_llm_output_transform(
     transformed, pre_transform = False, None
     payload = dict(response_text=final_response, session_id=agent.session_id or "", model=agent.model,
                    platform=platform, turn_id=turn_id)  # turn_id: per-turn identity for the hook callback gate
+    # local patch: the compression-stable conversation root, so a plugin keyed on it still finds its
+    # state after a compaction rotated session_id; dropped (not fatal) if the lineage walk fails.
+    try:
+        from agent.turn_stop_gates import _conversation_id_safe
+        payload["conversation_id"] = _conversation_id_safe(agent)
+    except Exception:
+        payload["conversation_id"] = ""
     held = getattr(agent, "_held_transforms", None) if getattr(agent, "_hold_stream", False) else None
     if held:
         rewrite = _run_held_transforms(held, payload, logger)
