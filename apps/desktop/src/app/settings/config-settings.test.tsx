@@ -11,6 +11,7 @@ import { $settingsRequestProfile } from '@/store/settings-scope'
 import { $autoSpeakReplies, setAutoSpeakReplies } from '@/store/voice-prefs'
 
 import type { ConfigSettings as ConfigSettingsType } from './config-settings'
+import { configSubpageForField } from './config-subpages'
 
 // The vi.mock factory below replaces the computed (read-only) atom with a
 // writable one; narrow the import back so tests can drive it.
@@ -87,14 +88,14 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-function renderConfigSettings(activeSectionId = 'safety') {
+function renderConfigSettings(activeSectionId = 'safety', subpage?: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const importInputRef = createRef<HTMLInputElement>()
 
   const { container } = render(
     <MemoryRouter>
       <QueryClientProvider client={client}>
-        <ConfigSettings activeSectionId={activeSectionId} importInputRef={importInputRef} />
+        <ConfigSettings activeSectionId={activeSectionId} importInputRef={importInputRef} subpage={subpage} />
       </QueryClientProvider>
     </MemoryRouter>
   )
@@ -103,7 +104,12 @@ function renderConfigSettings(activeSectionId = 'safety') {
 }
 
 describe('ConfigSettings Memory & Context', () => {
-  it('shows both opt-in skills.retrieval fields in the Memory & Context section', async () => {
+  it('routes both skills.retrieval fields to the context subpage', () => {
+    expect(configSubpageForField('memory', 'skills.retrieval.enabled')).toBe('context')
+    expect(configSubpageForField('memory', 'skills.retrieval.top_k')).toBe('context')
+  })
+
+  it('shows both opt-in skills.retrieval fields on the Memory & Context context subpage', async () => {
     getHermesConfigRecord.mockResolvedValue({
       skills: { retrieval: { enabled: false, top_k: 3 } }
     })
@@ -114,7 +120,7 @@ describe('ConfigSettings Memory & Context', () => {
       }
     })
 
-    const { container } = renderConfigSettings('memory')
+    const { container } = renderConfigSettings('memory', 'context')
 
     expect(await screen.findByRole('switch', { name: 'Relevant Skill Hints' })).toBeTruthy()
     // Number fields render their title as a plain span, not as a <label>.
