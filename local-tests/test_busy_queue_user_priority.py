@@ -14,33 +14,42 @@ import os
 import tempfile
 import unittest
 
+from unittest.mock import MagicMock, patch
+
 _HOME = tempfile.mkdtemp(prefix="hermes-home-")
-os.environ["HERMES_HOME"] = _HOME
-
-from unittest.mock import MagicMock  # noqa: E402
-
-from gateway.platforms.base import BasePlatformAdapter, Platform, PlatformConfig  # noqa: E402
-from gateway.platforms.event import MessageEvent, MessageType  # noqa: E402
-from gateway.run import GatewayRunner  # noqa: E402
+_ENV = patch.dict(os.environ, {"HERMES_HOME": _HOME})
 
 SK = "telegram:user:1"
 
 
-class StubAdapter(BasePlatformAdapter):
-    def __init__(self):
-        super().__init__(PlatformConfig(enabled=True, token="test"), Platform.TELEGRAM)
+def setUpModule():
+    # The gateway imports touch HERMES_HOME at import time, so they run after the patch starts.
+    global BasePlatformAdapter, Platform, PlatformConfig, MessageEvent, MessageType, GatewayRunner
+    global StubAdapter
+    _ENV.start()
+    from gateway.platforms.base import BasePlatformAdapter, Platform, PlatformConfig
+    from gateway.platforms.event import MessageEvent, MessageType
+    from gateway.run import GatewayRunner
 
-    async def connect(self, *, is_reconnect=False):
-        return True
+    class StubAdapter(BasePlatformAdapter):
+        def __init__(self):
+            super().__init__(PlatformConfig(enabled=True, token="test"), Platform.TELEGRAM)
 
-    async def disconnect(self):
-        self._mark_disconnected()
+        async def connect(self, *, is_reconnect=False):
+            return True
 
-    async def send(self, chat_id, content, reply_to=None, metadata=None):
-        raise AssertionError("queueing must not send")
+        async def disconnect(self):
+            self._mark_disconnected()
 
-    async def get_chat_info(self, chat_id):
-        return {"id": chat_id, "type": "dm"}
+        async def send(self, chat_id, content, reply_to=None, metadata=None):
+            raise AssertionError("queueing must not send")
+
+        async def get_chat_info(self, chat_id):
+            return {"id": chat_id, "type": "dm"}
+
+
+def tearDownModule():
+    _ENV.stop()
 
 
 def _source():

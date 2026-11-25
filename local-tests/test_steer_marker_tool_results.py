@@ -17,16 +17,24 @@ import shutil
 import tempfile
 import unittest
 
-_HOME = tempfile.mkdtemp(prefix="hermes-home-")
-os.environ["HERMES_HOME"] = _HOME
+from unittest.mock import patch
 
-from agent.prompt_builder import STEER_MARKER_CLOSE, STEER_MARKER_OPEN, steer_user_row  # noqa: E402
-from agent.tool_dispatch_helpers import make_tool_result_message  # noqa: E402
+_HOME = tempfile.mkdtemp(prefix="hermes-home-")
+_ENV = patch.dict(os.environ, {"HERMES_HOME": _HOME})
 
 TRUSTED_TOOL = "terminal"
 
 
+def setUpModule():
+    # The agent imports touch HERMES_HOME at import time, so they run after the patch starts.
+    global STEER_MARKER_CLOSE, STEER_MARKER_OPEN, steer_user_row, make_tool_result_message
+    _ENV.start()
+    from agent.prompt_builder import STEER_MARKER_CLOSE, STEER_MARKER_OPEN, steer_user_row
+    from agent.tool_dispatch_helpers import make_tool_result_message
+
+
 def tearDownModule():
+    _ENV.stop()
     shutil.rmtree(_HOME, ignore_errors=True)
 
 

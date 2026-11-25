@@ -15,11 +15,22 @@ import os
 import tempfile
 import unittest
 
-_HOME = tempfile.mkdtemp(prefix="hermes-home-")
-os.environ["HERMES_HOME"] = _HOME
+from unittest.mock import patch
 
-from agent.tool_guardrails import ToolCallGuardrailConfig, ToolCallGuardrailController  # noqa: E402
-from hermes_cli.config_defaults import DEFAULT_CONFIG  # noqa: E402
+_HOME = tempfile.mkdtemp(prefix="hermes-home-")
+_ENV = patch.dict(os.environ, {"HERMES_HOME": _HOME})
+
+
+def setUpModule():
+    global ToolCallGuardrailConfig, ToolCallGuardrailController, DEFAULT_CONFIG
+    _ENV.start()
+    from agent.tool_guardrails import ToolCallGuardrailConfig, ToolCallGuardrailController
+    from hermes_cli.config_defaults import DEFAULT_CONFIG
+
+
+def tearDownModule():
+    _ENV.stop()
+
 
 BLOCKED_BODY = "Access denied: the remote site blocked this request. " * 8
 

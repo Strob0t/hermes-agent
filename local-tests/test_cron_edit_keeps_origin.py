@@ -16,12 +16,23 @@ import os
 import tempfile
 import unittest
 
-_HOME = tempfile.mkdtemp(prefix="hermes-home-")
-os.environ["HERMES_HOME"] = _HOME
+from unittest.mock import patch
 
-from cron import jobs as cron_jobs  # noqa: E402
-from gateway.session_context import _VAR_MAP, clear_session_vars, set_session_vars  # noqa: E402
-from tools.cronjob_tools import cronjob  # noqa: E402
+_HOME = tempfile.mkdtemp(prefix="hermes-home-")
+_ENV = patch.dict(os.environ, {"HERMES_HOME": _HOME})
+
+
+def setUpModule():
+    # cron.jobs reads HERMES_HOME at import time, so the imports run after the patch starts.
+    global cron_jobs, _VAR_MAP, clear_session_vars, set_session_vars, cronjob
+    _ENV.start()
+    from cron import jobs as cron_jobs
+    from gateway.session_context import _VAR_MAP, clear_session_vars, set_session_vars
+    from tools.cronjob_tools import cronjob
+
+
+def tearDownModule():
+    _ENV.stop()
 
 
 def _call(**kw):

@@ -315,6 +315,7 @@ def _active(agent: Any) -> bool:
 _GUARD_DETECTORS = {
     **dict.fromkeys(("repeated_exact_failure_block", "repeated_exact_failure_warning"), "exact_failure"),
     **dict.fromkeys(("idempotent_no_progress_block", "idempotent_no_progress_warning"), "idempotent_no_progress"),
+    **dict.fromkeys(("repeated_result_halt", "repeated_result_warning"), "idempotent_no_progress"),
     **dict.fromkeys(("same_tool_failure_halt", "same_tool_failure_warning"), "same_tool_failure"),
     "identical_call_streak_halt": "identical_call_streak", "identical_call_streak": "identical_call_streak",
     "identical_cycle_halt": "identical_cycle", "identical_cycle": "identical_cycle",

@@ -14,11 +14,23 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 
-_HOME = tempfile.mkdtemp(prefix="hermes-claim-release-")
-os.environ["HERMES_HOME"] = _HOME
+from unittest.mock import patch
 
-import cron.jobs as jobs  # noqa: E402
-import cron.scheduler as scheduler  # noqa: E402
+_HOME = tempfile.mkdtemp(prefix="hermes-claim-release-")
+_ENV = patch.dict(os.environ, {"HERMES_HOME": _HOME})
+
+
+def setUpModule():
+    # cron.jobs reads HERMES_HOME at import time, so the import runs after the patch starts.
+    global jobs, scheduler
+    _ENV.start()
+    import cron.jobs as jobs
+    import cron.scheduler as scheduler
+
+
+def tearDownModule():
+    _ENV.stop()
+
 
 OWNER = "test-host:owner-1"
 

@@ -20,21 +20,20 @@ from pathlib import Path
 from unittest.mock import patch
 
 _HOME = tempfile.mkdtemp(prefix="hermes-home-")
-# Import-time code must not touch ~/.hermes; other test modules rebind HERMES_HOME, so the run
-# re-applies this home in setUpModule.
-os.environ["HERMES_HOME"] = _HOME
 _ENV = patch.dict(os.environ, {"HERMES_HOME": _HOME})
 _CONFIG = os.path.join(_HOME, "config.yaml")
 
-import gateway.run as gateway_run  # noqa: E402
-from gateway.config import PlatformConfig  # noqa: E402
-from gateway.platforms.api_server import APIServerAdapter, _request_agent_overrides  # noqa: E402
-from hermes_cli.tools_config import _get_platform_tools  # noqa: E402
-from model_tools import _select_tool_names  # noqa: E402
-
 
 def setUpModule():
+    # The Hermes imports touch HERMES_HOME at import time, so they run after the patch starts.
+    global gateway_run, PlatformConfig, APIServerAdapter, _request_agent_overrides
+    global _get_platform_tools, _select_tool_names
     _ENV.start()
+    import gateway.run as gateway_run
+    from gateway.config import PlatformConfig
+    from gateway.platforms.api_server import APIServerAdapter, _request_agent_overrides
+    from hermes_cli.tools_config import _get_platform_tools
+    from model_tools import _select_tool_names
 
 
 def tearDownModule():

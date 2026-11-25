@@ -20,12 +20,21 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-os.environ["HERMES_HOME"] = tempfile.mkdtemp(prefix="hermes-home-outputschema-")
+from mcp import Client, types
+from mcp.server.lowlevel import Server
 
-from mcp import Client, types  # noqa: E402
-from mcp.server.lowlevel import Server  # noqa: E402
+_ENV = patch.dict(os.environ, {"HERMES_HOME": tempfile.mkdtemp(prefix="hermes-home-outputschema-")})
 
-from tools.mcp_tool import MCPServerTask  # noqa: E402
+
+def setUpModule():
+    global MCPServerTask
+    _ENV.start()
+    from tools.mcp_tool import MCPServerTask
+
+
+def tearDownModule():
+    _ENV.stop()
+
 
 _SCHEMA = {"type": "object", "properties": {"count": {"type": "integer"}}, "required": ["count"]}
 _REPLIES = {

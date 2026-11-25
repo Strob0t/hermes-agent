@@ -15,12 +15,23 @@ import copy
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 _HOME = tempfile.mkdtemp(prefix="hermes-home-")
-os.environ["HERMES_HOME"] = _HOME
+_ENV = patch.dict(os.environ, {"HERMES_HOME": _HOME})
 
-from agent.context_compressor import COMPRESSED_SUMMARY_METADATA_KEY, ContextCompressor  # noqa: E402
-from agent.turn_context import compose_user_api_content  # noqa: E402
+
+def setUpModule():
+    # The agent imports touch HERMES_HOME at import time, so they run after the patch starts.
+    global COMPRESSED_SUMMARY_METADATA_KEY, ContextCompressor, compose_user_api_content
+    _ENV.start()
+    from agent.context_compressor import COMPRESSED_SUMMARY_METADATA_KEY, ContextCompressor
+    from agent.turn_context import compose_user_api_content
+
+
+def tearDownModule():
+    _ENV.stop()
+
 
 FACT = "Quartz orchard appointment: 17 November 2031, 14:37 CET."
 RECALL = f"## OpenViking recall\n- {FACT}\n- prefers draft PRs"

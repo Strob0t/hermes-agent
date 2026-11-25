@@ -19,13 +19,21 @@ import unittest
 from unittest.mock import patch
 
 _HOME = tempfile.mkdtemp(prefix="hermes-loop-health-")
-os.environ["HERMES_HOME"] = _HOME
 _ENV = patch.dict(os.environ, {"HERMES_HOME": _HOME})
 
-from agent.monitoring import gateway_health_export as export  # noqa: E402
-from agent.monitoring.gateway_health import classify_gateway_error  # noqa: E402
-from gateway import loop_health  # noqa: E402
-from gateway.shutdown_watchdog import start_loop_liveness_watchdog  # noqa: E402
+
+def setUpModule():
+    global export, classify_gateway_error, loop_health, start_loop_liveness_watchdog
+    _ENV.start()
+    from agent.monitoring import gateway_health_export as export
+    from agent.monitoring.gateway_health import classify_gateway_error
+    from gateway import loop_health
+    from gateway.shutdown_watchdog import start_loop_liveness_watchdog
+
+
+def tearDownModule():
+    _ENV.stop()
+
 
 LOOP_NAMES = (
     "hermes.gateway.loop.responsive",
@@ -50,8 +58,6 @@ def wait_for(pred, timeout=5.0):
 
 class EnvCase(unittest.TestCase):
     def setUp(self):
-        _ENV.start()
-        self.addCleanup(_ENV.stop)
         loop_health.reset_probe()
         self.addCleanup(loop_health.reset_probe)
 

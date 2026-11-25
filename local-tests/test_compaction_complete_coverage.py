@@ -16,16 +16,22 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 _HOME = tempfile.mkdtemp(prefix="hermes-home-")
-os.environ["HERMES_HOME"] = _HOME
-
-from agent.context_compressor import ContextCompressor  # noqa: E402
+_ENV = patch.dict(os.environ, {"HERMES_HOME": _HOME})
 
 PRIOR = "## Summary\nPRIOR_SUMMARY_FROM_EARLIER_COMPACTION"
 GROUPS = 80
 FILLER = "x" * 3800
 
 
+def setUpModule():
+    # The compressor import touches HERMES_HOME at import time, so it runs after the patch starts.
+    global ContextCompressor
+    _ENV.start()
+    from agent.context_compressor import ContextCompressor
+
+
 def tearDownModule():
+    _ENV.stop()
     shutil.rmtree(_HOME, ignore_errors=True)
 
 
