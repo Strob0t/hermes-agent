@@ -850,6 +850,7 @@ gateway:
     max_concurrent_runs: 10   # concurrent-run cap; 0 disables the limit
     history_tool_output_max_chars: 0   # cap tool outputs in stored /v1/responses history; 0 = verbatim
     persist_data_url_images: false   # save inbound data:image URLs to the image cache
+    image_vision_routing: false   # describe inline images via auxiliary vision in text image mode
 ```
 
 `port`, `key`, `host`, `cors_origins`, and `model_name` are automatically bridged into the platform's `extra` settings, so they behave exactly like their `API_SERVER_*` environment-variable counterparts. Environment variables take precedence over `config.yaml` values. The block is also accepted under `gateway.platforms.api_server:` or a top-level `platforms.api_server:` section.
@@ -865,6 +866,10 @@ Each stored `/v1/responses` snapshot embeds the full cumulative conversation his
 ### Persisting inline data-URL images
 
 By default an inline `data:image/...;base64,...` image part is only forwarded to the model. Set `gateway.api_server.persist_data_url_images: true` (default **false**) to also save the decoded bytes in the gateway image cache as `api_inbound_<sha256>.<ext>` and add one text part `[image '<name>' saved at: <path>]` next to the image part, so tools can re-read the image after the turn. The image part itself is unchanged. The file name comes from the bytes, so a replayed turn (`conversation_history`, `previous_response_id`) writes no second file and adds no second note. Each new image costs disk space in the image cache until the normal cache cleanup removes it; payloads that are not valid images are not saved. Remote `http(s)` image URLs are never downloaded.
+
+### Vision routing for inline images
+
+By default image parts (`image_url` / `input_image`) reach the agent unchanged. Set `gateway.api_server.image_vision_routing: true` (default **false**) to use the same image routing as the messaging gateway: when `agent.image_input_mode` and `auxiliary.vision` resolve to text mode for the main model (for example a text-only main model, or an explicit `auxiliary.vision` backend in `auto` mode), each image part of the request and of its `conversation_history` is described with `vision_analyze` before the agent runs, and the message content becomes one text with the descriptions in front of the user text. A `data:image/...;base64,...` image is first saved in the image cache (as with `persist_data_url_images`) so the note can name a local path that `vision_analyze` can read again. One image URL is described only once per request, also when it is in many history turns. In native image mode nothing changes. If the vision call fails, the image becomes a short "could not see it" note.
 
 ## Security Headers
 
