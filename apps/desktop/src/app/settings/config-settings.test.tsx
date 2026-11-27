@@ -1,6 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { cleanup, render, screen } from '@testing-library/react'
 import { atom } from 'nanostores'
+import { writeFileSync } from 'node:fs'
 import { createRef } from 'react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -10,6 +11,7 @@ import { $settingsRequestProfile } from '@/store/settings-scope'
 import { $autoSpeakReplies, setAutoSpeakReplies } from '@/store/voice-prefs'
 
 import type { ConfigSettings as ConfigSettingsType } from './config-settings'
+import { configSubpageForField } from './config-subpages'
 
 // The vi.mock factory below replaces the computed (read-only) atom with a
 // writable one; narrow the import back so tests can drive it.
@@ -32,6 +34,10 @@ vi.mock('@/hermes', async () => ({
   getHermesConfigSchema: () => getHermesConfigSchema(),
   saveHermesConfig: (config: unknown, profile?: string) => saveHermesConfig(config, profile),
   getElevenLabsVoices: () => getElevenLabsVoices(),
+  // The Memory & Context section renders the memory layers panel and the
+  // profile picker; empty results keep both quiet.
+  getMemoryStatus: async () => ({ active: '', providers: [], builtin_files: { memory: 0, user: 0 } }),
+  getProfiles: async () => ({ profiles: [] }),
   setApiRequestProfile: () => {}
 }))
 
@@ -82,20 +88,55 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-function renderConfigSettings(activeSectionId = 'safety') {
+function renderConfigSettings(activeSectionId = 'safety', subpage?: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const importInputRef = createRef<HTMLInputElement>()
 
-  render(
+  const { container } = render(
     <MemoryRouter>
       <QueryClientProvider client={client}>
-        <ConfigSettings activeSectionId={activeSectionId} importInputRef={importInputRef} />
+        <ConfigSettings activeSectionId={activeSectionId} importInputRef={importInputRef} subpage={subpage} />
       </QueryClientProvider>
     </MemoryRouter>
   )
 
-  return { importInputRef }
+  return { container, importInputRef }
 }
+
+describe('ConfigSettings Memory & Context', () => {
+  it('routes both skills.retrieval fields to the context subpage', () => {
+    expect(configSubpageForField('memory', 'skills.retrieval.enabled')).toBe('context')
+    expect(configSubpageForField('memory', 'skills.retrieval.top_k')).toBe('context')
+  })
+
+  it('shows both opt-in skills.retrieval fields on the Memory & Context context subpage', async () => {
+    getHermesConfigRecord.mockResolvedValue({
+      skills: { retrieval: { enabled: false, top_k: 3 } }
+    })
+    getHermesConfigSchema.mockResolvedValue({
+      fields: {
+        'skills.retrieval.enabled': { type: 'boolean' },
+        'skills.retrieval.top_k': { type: 'number' }
+      }
+    })
+
+    const { container } = renderConfigSettings('memory', 'context')
+
+    expect(await screen.findByRole('switch', { name: 'Relevant Skill Hints' })).toBeTruthy()
+    // Number fields render their title as a plain span, not as a <label>.
+    expect(await screen.findByText('Skill Hint Count')).toBeTruthy()
+    const topK = container.querySelector<HTMLInputElement>(
+      '[id="setting-field-skills.retrieval.top_k"] input[type="number"]'
+    )
+    expect(topK?.value).toBe('3')
+
+    const dumpPath = process.env.HERMES_DUMP_DOM
+
+    if (dumpPath) {
+      writeFileSync(dumpPath, container.innerHTML)
+    }
+  })
+})
 
 describe('ConfigSettings autosave', () => {
   it('sends a later revert instead of diffing it away against the stale page-load baseline', async () => {

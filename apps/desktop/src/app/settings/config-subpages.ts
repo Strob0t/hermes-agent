@@ -66,7 +66,7 @@ const CONFIG_SUBPAGE_DEFINITIONS: Record<string, ConfigSubpageDefinition[]> = {
     {
       id: 'context',
       labelKey: 'memoryContext',
-      prefixes: ['context.', 'compression.', 'auxiliary.compression.']
+      prefixes: ['context.', 'compression.', 'auxiliary.compression.', 'skills.retrieval.']
     }
   ],
   voice: [

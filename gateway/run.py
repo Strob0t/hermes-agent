@@ -2043,6 +2043,19 @@ def _bridge_auxiliary_config_to_env(_auxiliary_cfg: dict) -> None:
                 os.environ[f"AUXILIARY_{_upper}_{_suffix}"] = _value
 
 
+def _bridge_skills_retrieval_to_env(skills_cfg: Any) -> None:
+    """Bridge ``skills.retrieval.*`` like ``agent.max_turns``: config wins over .env. Only keys
+    present in the effective USER config are exported — the caller passes a no-defaults dict, so
+    an absent key leaves HERMES_SKILL_RETRIEVAL(_TOP_K) as the fallback the agent init reads."""
+    if not isinstance(skills_cfg, dict) or not isinstance(skills_cfg.get("retrieval"), dict):
+        return
+    retrieval = skills_cfg["retrieval"]
+    if "enabled" in retrieval:
+        os.environ["HERMES_SKILL_RETRIEVAL"] = "on" if retrieval["enabled"] else "off"
+    if "top_k" in retrieval and retrieval["top_k"] is not None:
+        os.environ["HERMES_SKILL_RETRIEVAL_TOP_K"] = str(retrieval["top_k"])
+
+
 def _bridge_config_to_env(_cfg: dict) -> None:
     """Export config.yaml settings to the env vars os.getenv() consumers read."""
     bridge_config_scalars(_cfg, os.environ)  # top-level scalars: fallback only, never override .env
@@ -2058,6 +2071,7 @@ def _bridge_config_to_env(_cfg: dict) -> None:
     # current config. See PR #18413 / the 60-vs-500 max_turns incident.
     _agent_cfg = _cfg.get("agent", {})
     _bridge_max_turns_to_env(_agent_cfg)
+    _bridge_skills_retrieval_to_env(_cfg.get("skills", {}))
     _bridge_section_to_env(_agent_cfg, _AGENT_ENV_BRIDGE)
     _bridge_section_to_env(_cfg.get("sessions", {}), _SESSIONS_ENV_BRIDGE)
     _display_cfg = _cfg.get("display", {})
