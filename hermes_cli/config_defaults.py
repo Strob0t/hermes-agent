@@ -181,6 +181,13 @@ DEFAULT_CONFIG = {
         # run the tests:", "接下来看日志。") gets a "make the tool call now" nudge, max 2 per tool
         # round. "off" (default) | "on" | "auto" (on except on messaging surfaces).
         "false_stop_detection": "off",
+        # Opt-in: one owner-only (0o600) receipt per turn under <HERMES_HOME>/runtime/
+        # turn-execution-receipts/ with the provider requests, tool dispatches and execution
+        # middleware decisions Hermes observed. Written atomically, never replaces an existing file.
+        "execution_receipts": {"enabled": False},
+        # Opt-in: a one-shot session (`hermes -z`) waits up to this many seconds for MCP discovery
+        # still in flight before its first turn, so a slow server's tools reach the only turn. 0 = off.
+        "oneshot_mcp_wait_seconds": 0,
         # "Finish the job" prompt block for all models: don't stop at a stub, never fabricate output
         # when the real path is blocked. ~80 cached tokens. False disables.
         "task_completion_guidance": True,

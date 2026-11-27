@@ -2369,6 +2369,21 @@ agent:
   false_stop_detection: "on"
 ```
 
+`agent.execution_receipts.enabled` (default `false`) turns on per-turn execution receipts. Each turn of the main loop then writes one JSON file below `<HERMES_HOME>/runtime/turn-execution-receipts/<sha256 of session id>/<sha256 of turn id>.json`. It lists each provider request that reached the provider callback, each top-level tool dispatch (tool call IDs are hashed), and the decision of each execution middleware frame (opaque registration IDs only, no plugin names). The receipt is finalized on every exit path of the turn: normal end, exception and interrupt (`final_status` is `completed`, `failed`, `interrupted` or `incomplete`). The file has mode `0600`, is written atomically and never replaces an existing receipt. With the default `false` no receipt is written:
+
+```yaml
+agent:
+  execution_receipts:
+    enabled: true
+```
+
+`agent.oneshot_mcp_wait_seconds` (default `0`, off) makes a one-shot session (`hermes -z`) wait up to this many seconds for MCP discovery that is still in flight before its first turn, so the tools of a slow MCP server are in the only turn of the run. With `0` the turn starts at once, as before:
+
+```yaml
+agent:
+  oneshot_mcp_wait_seconds: 15
+```
+
 The same gate also enables **result-reference stubbing**: when a re-issued identical tool call returns a byte-identical fresh result, the duplicate payload enters context as a short reference stub pointing at the earlier result (tool name, `tool_call_id`, an args summary, and — if the first result was persisted to disk — its spillover path) instead of repeating the full output. The tool still executes every time, so polling semantics are preserved: a changed result always flows through whole. Results under 512 characters, error results, and multimodal results are never stubbed, and pollers *are* stubbed (an unchanged poll is exactly the case where the duplicate payload carries no information).
 
 ### Turn liveness watchdog

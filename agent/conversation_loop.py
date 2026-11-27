@@ -1609,6 +1609,8 @@ def _turn_without_loop(agent: Any, s: _LoopState, block_message: str) -> Optiona
 def _codex_app_server_turn(agent: Any, s: Any) -> Optional[dict[str, Any]]:
     """The codex app-server's result for this turn, or None when its failure activated a fallback and the
     generic loop retries the same user turn."""
+    from agent.execution_receipt import mark_active_turn_inexact
+    mark_active_turn_inexact("codex_app_server_runtime_unobserved")
     codex_result = agent._run_codex_app_server_turn(
         user_message=s.user_message, original_user_message=s.original_user_message,
         messages=s.messages, effective_task_id=s.effective_task_id,
@@ -1806,11 +1808,88 @@ def run_conversation(
 ) -> dict[str, Any]:
     """Run one turn (see ``_run_conversation_turn``) and export the current-turn boundary.
 
+    With ``agent.execution_receipts.enabled`` the turn runs under a per-turn execution receipt
+    that is finalized on every exit path (``agent.execution_receipt``).
+
     Every envelope that leaves the loop — success, partial/error, interrupt, retry-exhausted,
     tool-limit, preflight timeout, codex runtime — passes through here, so the
     ``{turn_id, current_turn_user_idx}`` pair is stamped beside the exact ``messages`` it
     addresses, after every history rewrite including post-turn micro-compaction.
     """
+    def _turn() -> dict[str, Any]:
+        return _run_conversation_receipted(
+            agent, user_message, system_message=system_message, conversation_history=conversation_history,
+            task_id=task_id, stream_callback=stream_callback, persist_user_message=persist_user_message,
+            persist_user_timestamp=persist_user_timestamp, persist_user_display_kind=persist_user_display_kind,
+            persist_user_display_metadata=persist_user_display_metadata,
+            persist_user_platform_id=persist_user_platform_id, moa_config=moa_config, turn_author=turn_author,
+            title_user_message=title_user_message, prelude=prelude,
+        )
+
+    receipts_enabled, oneshot_mcp_wait = _opt_in_turn_settings(agent)
+    if oneshot_mcp_wait:
+        _maybe_wait_for_oneshot_mcp(agent, oneshot_mcp_wait)
+    from agent.execution_receipt import run_turn_with_receipt, run_turn_without_receipt
+    if receipts_enabled:
+        return run_turn_with_receipt(agent, task_id, _turn)
+    return run_turn_without_receipt(_turn)
+
+
+def _opt_in_turn_settings(agent: Any) -> tuple[bool, float]:
+    """``(agent.execution_receipts.enabled, agent.oneshot_mcp_wait_seconds)``, read once per agent."""
+    cached = getattr(agent, "_opt_in_turn_settings", None)
+    if isinstance(cached, tuple):
+        return cached
+    settings: tuple[bool, float] = (False, 0.0)
+    try:
+        from agent.execution_receipt import execution_receipts_enabled
+        from hermes_cli.config import load_config_readonly
+        from hermes_cli.oneshot import oneshot_mcp_wait_seconds
+        section = load_config_readonly().get("agent")
+        settings = (execution_receipts_enabled(section), oneshot_mcp_wait_seconds(section))
+    except Exception:
+        logger.debug("agent.execution_receipts / oneshot_mcp_wait_seconds unreadable; both off", exc_info=True)
+    try:
+        agent._opt_in_turn_settings = settings
+    except Exception:
+        pass
+    return settings
+
+
+def _maybe_wait_for_oneshot_mcp(agent: Any, seconds: float) -> None:
+    """A one-shot session waits for in-flight MCP discovery before its first turn: the turn-start
+    MCP refresh then puts a late server's tools into the only turn the run has."""
+    if getattr(agent, "_oneshot_mcp_waited", False):
+        return
+    try:
+        from agent.oneshot_footprint import agent_is_oneshot
+        if not agent_is_oneshot(agent):
+            return
+        agent._oneshot_mcp_waited = True
+        from hermes_cli.oneshot import wait_for_oneshot_mcp_discovery
+        wait_for_oneshot_mcp_discovery(seconds)
+    except Exception:
+        logger.debug("one-shot MCP discovery wait skipped", exc_info=True)
+
+
+def _run_conversation_receipted(
+    agent,
+    user_message: Any,
+    *,
+    system_message: str | None,
+    conversation_history: list[dict[str, Any]] | None,
+    task_id: str | None,
+    stream_callback: Optional[callable],
+    persist_user_message: Optional[Any],
+    persist_user_timestamp: Optional[float],
+    persist_user_display_kind: Optional[str],
+    persist_user_display_metadata: Optional[dict[str, Any]],
+    persist_user_platform_id: Optional[str],
+    moa_config: Optional[dict[str, Any]],
+    turn_author: Optional[dict[str, Any]],
+    title_user_message: Optional[str],
+    prelude: Optional[Prelude],
+) -> dict[str, Any]:
     from agent.turn_context import export_current_turn_boundary
     from agent.turn_finalizer import fence_result_reply, settle_held_final
     from agent.prompt_cache_lifecycle import end_turn_prompt_cache_warming
