@@ -31,6 +31,8 @@ logger = logging.getLogger(__name__)
 # home.
 EXECUTIONS_FILE: Optional[Path] = None
 MAX_TERMINAL_EXECUTIONS = 1000
+# An adapter traceback is not a log line; bound what one attempt may store.
+MAX_DELIVERY_ERROR_CHARS = 4000
 HANDOFF_ADOPTION_GRACE_SECONDS = 30.0
 # Floor for the live-owner stale-claim bound (#115692); see _live_owner_stale_after_seconds.
 LIVE_OWNER_STALE_CLAIM_FLOOR_SECONDS = 7200.0
@@ -97,6 +99,7 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
         "ON executions(status, claimed_at DESC, id DESC)"
     )
     add_column_if_missing(conn, "executions", "delivery_outcome", "delivery_outcome TEXT")
+    add_column_if_missing(conn, "executions", "delivery_error", "delivery_error TEXT")
     add_column_if_missing(conn, "executions", "scheduled_instant", "scheduled_instant TEXT")
     add_column_if_missing(conn, "executions", "progress_at", "progress_at TEXT")
     conn.execute(
@@ -344,14 +347,39 @@ def mark_execution_running(execution_id: str) -> Optional[dict[str, Any]]:
     return record
 
 
+def _bounded_delivery_error(delivery_error: Optional[str]) -> Optional[str]:
+    """Normalize a delivery reason for storage: blank is no reason, secrets are scrubbed like
+    ``error``, and a multi-KB adapter traceback is capped at ``MAX_DELIVERY_ERROR_CHARS``."""
+    if delivery_error is None:
+        return None
+    text = str(delivery_error)
+    if not text.strip():
+        return None
+    try:
+        from agent.redact import redact_sensitive_text
+
+        text = redact_sensitive_text(text, force=True, redact_url_credentials=True)
+    except Exception:
+        logger.warning("Failed to redact cron delivery error before persisting it", exc_info=True)
+        return "[REDACTED - redaction failed]"
+    if len(text) > MAX_DELIVERY_ERROR_CHARS:
+        return text[:MAX_DELIVERY_ERROR_CHARS] + "… [truncated]"
+    return text
+
+
 def finish_execution(
     execution_id: str, *, success: bool, error: Optional[str] = None,
     delivery_outcome: Optional[str] = None, cancelled: bool = False,
+    delivery_error: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     """Write a terminal result once; terminal attempts cannot be rewritten.
 
     Only the owning process may finish its attempt; receipt recovery for a departed owner
     settles through ``recover_receipted_execution``.
+
+    ``delivery_error`` is why the result never reached its target. It is not folded into
+    ``error``: a successful run whose notice failed is a different fact, and the jobs store keeps
+    only the latest ``last_delivery_error`` per job, so this row is the per-attempt record.
     """
     now = _hermes_now().isoformat()
     status = "cancelled" if cancelled else ("completed" if success else "failed")
@@ -365,10 +393,11 @@ def finish_execution(
         cur = conn.execute(
             """UPDATE executions
                SET status=?, finished_at=?, error=?, handoff_pending=0,
-                   handoff_started_at=NULL, delivery_outcome=?
+                   handoff_started_at=NULL, delivery_outcome=?, delivery_error=?
                WHERE id=? AND status IN ('claimed','running')
                  AND process_id=? AND pid=?""",
-            (status, now, detail, delivery_outcome, execution_id, *owner),
+            (status, now, detail, delivery_outcome, _bounded_delivery_error(delivery_error),
+             execution_id, *owner),
         )
         if cur.rowcount != 1:
             return None
@@ -407,7 +436,9 @@ def record_missed_occurrences(
     return record
 
 
-def recover_receipted_execution(execution_id, job_id, *, success, error=None, delivery_outcome=None):
+def recover_receipted_execution(
+    execution_id, job_id, *, success, error=None, delivery_outcome=None, delivery_error=None,
+):
     """Settle a verified canonical receipt after owner loss, including its unknown audit row.
 
     Terminal verdicts stay immutable. A live firer still owns its bookkeeping
@@ -423,8 +454,9 @@ def recover_receipted_execution(execution_id, job_id, *, success, error=None, de
             return None
         conn.execute(
             """UPDATE executions SET status=?, finished_at=?, error=?, handoff_pending=0,
-               handoff_started_at=NULL, delivery_outcome=? WHERE id=?""",
-            ('completed' if success else 'failed', now, detail, delivery_outcome, execution_id))
+               handoff_started_at=NULL, delivery_outcome=?, delivery_error=? WHERE id=?""",
+            ('completed' if success else 'failed', now, detail, delivery_outcome,
+             _bounded_delivery_error(delivery_error), execution_id))
         _prune_unlocked(conn)
         record = _fetch(conn, execution_id)
     _emit_execution_state(record, delivery_outcome=delivery_outcome)

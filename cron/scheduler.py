@@ -2828,7 +2828,7 @@ def run_one_job(
             finally:
                 finish_execution(
                     execution_id, success=False, error=error,
-                    delivery_outcome=delivery_outcome)
+                    delivery_outcome=delivery_outcome, delivery_error=delivery_error)
             return True
         if handed_off:
             from cron.scheduler_worker_failure import record_unknown_worker_outcome
@@ -3460,7 +3460,8 @@ def _run_one_job_body(
             logger.error("Failed to record interrupted run for job %s: %s", job["id"], record_err)
         try:
             finish_execution(
-                execution_id, success=False, error=_err_text, delivery_outcome=delivery_outcome)
+                execution_id, success=False, error=_err_text, delivery_outcome=delivery_outcome,
+                delivery_error=delivery_error)
         except Exception as record_err:
             logger.error("Failed to finish execution record for job %s: %s", job["id"], record_err)
         if not contained:
