@@ -1410,6 +1410,10 @@ agent:
   api_max_retries: 3           # Retries per provider before fallback engages (default: 3)
   auto_recovery_cycles: 5      # Wait-and-retry cycles after retries + fallback are spent on an outage (0 = off)
   rate_limit_tail_wait_seconds: 0  # Wait once for a short rate-limit cooldown, then retry once (0 = off, max 60)
+  retry_base_delay: 5.0        # Backoff base (s) for invalid/empty-response retries
+  retry_max_delay: null        # Backoff cap (s); null = built-in (120 invalid, 60 empty)
+  rate_limit_retry_base_delay: 2.0  # Backoff base (s) for retryable API errors without Retry-After
+  rate_limit_retry_max_delay: null  # Backoff cap (s), also caps a provider Retry-After; null = 60 / 600
 ```
 
 `agent.max_turns` is **unlimited by default** — the turn cap caused more problems than it solved (silent mid-task truncation), so out of the box Hermes runs a conversation turn to completion. To impose a cap, set a positive integer. To be explicit about "no limit", any of these case-insensitive spellings work: `"none"`, `"null"`, `"unlimited"`, `"infinite"`, `"infinity"`, `"inf"`, `0`, `-1` (they resolve to a `sys.maxsize` sentinel so the loop never exits on a turn count).

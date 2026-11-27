@@ -96,7 +96,8 @@ _YAML_SECTIONS: dict[str, tuple[str, ...]] = {
     "compression": ("target_max_tokens", "summary_target_tokens"),
     "protected_turns": ("first_system:protect_first_system", "first_human:protect_first_human",
                         "first_gpt:protect_first_gpt", "first_tool:protect_first_tool", "last_n_turns:protect_last_n_turns"),
-    "summarization": ("model:summarization_model", "base_url", "api_key_env", "temperature", "max_retries", "retry_delay"),
+    "summarization": ("model:summarization_model", "base_url", "api_key_env", "temperature", "max_retries", "retry_delay",
+                      "retry_max_delay"),
     "output": ("add_summary_notice", "summary_notice_text", "output_suffix"),
     "processing": ("num_workers", "max_concurrent_requests", "skip_under_target", "save_over_limit"),
     "metrics": ("enabled:metrics_enabled", "per_trajectory:metrics_per_trajectory", "output_file:metrics_output_file"),
@@ -121,6 +122,7 @@ class CompressionConfig:
     temperature: float = 0.3
     max_retries: int = 3
     retry_delay: int = 2
+    retry_max_delay: float = 30.0
     add_summary_notice: bool = True
     summary_notice_text: str = "\n\nSome of your previous tool responses may be summarized to preserve context."
     output_suffix: str = "_compressed"
@@ -450,7 +452,8 @@ Write only the summary, starting with "[CONTEXT SUMMARY]:" prefix."""
         metrics.summarization_errors += 1
         self.logger.warning("Summarization attempt %d failed: %s", attempt + 1, exc)
         if attempt < self.config.max_retries - 1:
-            return jittered_backoff(attempt + 1, base_delay=self.config.retry_delay, max_delay=30.0)
+            return jittered_backoff(attempt + 1, base_delay=self.config.retry_delay,
+                                   max_delay=self.config.retry_max_delay)
         return None
 
     def _generate_summary(self, content: str, metrics: TrajectoryMetrics) -> str:
