@@ -1076,7 +1076,9 @@ class ToolRegistry:
     def dispatch(
         self, name: str, args: dict, *, scope: Optional[str] = None, **kwargs) -> str | dict:
         """Execute a tool handler by name: async handlers bridged via ``_run_async()``,
-        results normalized, every exception returned as ``{"error": ...}``."""
+        results normalized, every exception (``SystemExit`` included) returned as
+        ``{"error": ...}``; other ``BaseException``s (``KeyboardInterrupt``, ``GeneratorExit``,
+        ``CancelledError``) propagate."""
         from tools.hosted_tool_policy import hosted_tool_refusal
         if refusal := hosted_tool_refusal(name):  # deny-by-default in a hosted scope, before any handler
             return tool_error(refusal)
@@ -1098,7 +1100,9 @@ class ToolRegistry:
             else:
                 result = entry.handler(args, **kwargs)
             return flag_unknown_args(self._normalize_handler_result(name, result), name, unknown, valid)
-        except Exception as e:
+        except (Exception, SystemExit) as e:
+            # A handler's sys.exit() (plugin code, or argparse/click inside it) is a failed call, not a
+            # request to stop Hermes; same boundary as plugin hooks (hermes_cli/plugins_dispatch.py).
             # exc_info already renders the exception, so keep the message copy bounded.
             logger.exception("Tool %s dispatch error: %s", name, _bound_error_text(str(e)))
             # Sanitize so framing tokens/CDATA/fences in exception text aren't structural noise.
