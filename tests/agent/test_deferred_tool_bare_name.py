@@ -80,4 +80,5 @@ def test_unroutable_call_is_still_rejected(arguments, kwargs):
 
     assert verdict.action == "continue"
     assert tc.function.name == "process_manage"
-    assert errors and errors[0].startswith("Tool 'process_manage' does not exist")
+    payload = json.loads(errors[0]) if errors else {}
+    assert payload.get("status") == "rejected" and payload.get("error", "").startswith("Tool 'process_manage' does not exist")
