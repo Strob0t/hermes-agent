@@ -27,7 +27,7 @@ import time
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Mapping, Optional
 
 from hermes_cli.kanban_workflow import DEFAULT_STATUSES as VALID_STATUSES
 from toolsets import get_toolset_names
@@ -878,8 +878,11 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 
 CREATE TABLE IF NOT EXISTS task_links (
-    parent_id  TEXT NOT NULL,
-    child_id   TEXT NOT NULL,
+    parent_id              TEXT NOT NULL,
+    child_id               TEXT NOT NULL,
+    -- Exact tasks.result the parent must record while 'done'. NULL keeps the
+    -- legacy done/archived terminal-status gate.
+    required_parent_result TEXT,
     PRIMARY KEY (parent_id, child_id)
 );
 
@@ -1159,7 +1162,8 @@ def create_task(
     assignee: Optional[str] = None, created_by: Optional[str] = None,
     workspace_kind: Optional[str] = None, workspace_path: Optional[str] = None,
     branch_name: Optional[str] = None, tenant: Optional[str] = None, priority: int = 0,
-    parents: Iterable[str] = (), triage: bool = False, idempotency_key: Optional[str] = None,
+    parents: Iterable[str] = (), required_parent_results: Optional[Mapping[str, str]] = None,
+    triage: bool = False, idempotency_key: Optional[str] = None,
     max_runtime_seconds: Optional[int] = None, skills: Optional[Iterable[str]] = None,
     max_retries: Optional[int] = None, model_override: Optional[str] = None,
     provider_override: Optional[str] = None, reasoning_effort: Optional[str] = None,
@@ -1171,10 +1175,13 @@ def create_task(
 ) -> str:
     """Create a task (optionally under ``parents``); returns its id.
 
-    Status: ``ready`` unless a parent is not ``done`` (``todo``); ``triage=True``
+    Status: ``ready`` unless a parent edge is unsatisfied (``todo``); ``triage=True``
     forces ``triage``; ``initial_status="blocked"`` parks it for human ops.
+    ``required_parent_results`` maps a parent id to the exact ``tasks.result``
+    that parent must record while ``done``; other parents keep the plain gate.
     ``idempotency_key``: an existing non-archived task with the key is returned
-    instead of a duplicate. ``max_runtime_seconds``: cap before the dispatcher
+    instead of a duplicate when its dependency contract is identical; a retry
+    with other parents or result predicates raises ``ValueError``. ``max_runtime_seconds``: cap before the dispatcher
     SIGTERMs and re-queues. ``model_override``/``provider_override`` pin the
     worker model (provider requires model); ``reasoning_effort`` is independent.
     ``creator_task_id``: inherit durable session/subscriptions independently of
@@ -1219,7 +1226,8 @@ def create_task(
     project_id, project_obj, project_repo, workspace_kind = _resolve_project_link(
         conn, project_id, project_source_task_id, workspace_kind, workspace_path
     )
-    parents = tuple(p for p in parents if p)
+    parents = tuple(str(p) for p in parents if p)
+    required_parent_results = _normalize_required_parent_results(parents, required_parent_results)
     skills_list = _normalize_task_skills(skills)
 
     # Idempotency check BEFORE the write txn (no lock held); a concurrent-create
@@ -1231,6 +1239,12 @@ def create_task(
             "ORDER BY created_at DESC LIMIT 1", (idempotency_key,),
         ).fetchone()
         if row:
+            requested = {pid: required_parent_results.get(pid) for pid in parents}
+            if _task_dependency_contract(conn, row["id"]) != requested:
+                raise ValueError(
+                    f"idempotency_key {idempotency_key!r} belongs to task "
+                    f"{row['id']!r} with a different dependency contract"
+                )
             return row["id"]
 
     now = int(time.time())
@@ -1249,7 +1263,10 @@ def create_task(
             # allow_nested: graph builders compose create_task under one outer
             # commit so the dispatcher never sees a half-built graph.
             with write_txn(conn, allow_nested=True):
-                task_status, tenant = initial_task_state(conn, parents, initial_status, triage, tenant)
+                task_status, tenant = initial_task_state(
+                    conn, parents, initial_status, triage, tenant,
+                    required_parent_results=required_parent_results,
+                )
                 # Project worktree: fresh dir under the repo + deterministic
                 # branch, instead of the random ``wt/<id>`` worker fallback.
                 if project_obj is not None and workspace_kind == "worktree":
@@ -1281,7 +1298,7 @@ def create_task(
                     ),
                 )
                 for pid in parents:
-                    _link(conn, pid, task_id)
+                    _link(conn, pid, task_id, required_parent_results.get(pid))
                 _append_event(
                     conn,
                     task_id,
@@ -1290,6 +1307,7 @@ def create_task(
                         "assignee": assignee,
                         "status": task_status,
                         "parents": list(parents),
+                        "required_parent_results": required_parent_results or None,
                         "creator_task_id": creator_task_id,
                         "tenant": tenant,
                         "workspace_kind": workspace_kind,
@@ -1312,7 +1330,7 @@ def create_task(
                 if task_status == "todo":
                     # Parked behind an open parent: record why, exactly as
                     # link_tasks does, so the board never shows an unexplained todo.
-                    gating = [p for p in parents if _task_status(conn, p) not in ("done", "archived")]
+                    gating = [pid for pid, _status in unsatisfied_parents(conn, task_id)]
                     if gating:
                         _append_event(
                             conn,
@@ -1343,11 +1361,59 @@ def _project_branch_name(project_obj: Any, task_id: str, title: Optional[str]) -
         return None
 
 
-def _link(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
-    conn.execute(
-        "INSERT OR IGNORE INTO task_links (parent_id, child_id) VALUES (?, ?)",
-        (parent_id, child_id),
+def _link(
+    conn: sqlite3.Connection, parent_id: str, child_id: str,
+    required_parent_result: Optional[str] = None,
+) -> None:
+    inserted = conn.execute(
+        "INSERT OR IGNORE INTO task_links (parent_id, child_id, required_parent_result) "
+        "VALUES (?, ?, ?)", (parent_id, child_id, required_parent_result),
     )
+    # Re-linking without a predicate stays idempotent; an explicit predicate
+    # upgrades an existing edge in place.
+    if inserted.rowcount == 0 and required_parent_result is not None:
+        conn.execute(
+            "UPDATE task_links SET required_parent_result = ? "
+            "WHERE parent_id = ? AND child_id = ?",
+            (required_parent_result, parent_id, child_id),
+        )
+
+
+def _normalize_required_parent_result(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("required_parent_result must be a non-empty string")
+    return value.strip()
+
+
+def _normalize_required_parent_results(
+    parents: tuple[str, ...], required_parent_results: Optional[Mapping[str, str]],
+) -> dict[str, str]:
+    if required_parent_results is None:
+        return {}
+    if not isinstance(required_parent_results, Mapping):
+        raise ValueError("required_parent_results must map parent ids to results")
+    normalized: dict[str, str] = {}
+    for raw_parent_id, raw_result in required_parent_results.items():
+        parent_id = str(raw_parent_id).strip()
+        if parent_id not in parents:
+            raise ValueError(f"required parent {parent_id!r} is not present in parents")
+        if not isinstance(raw_result, str) or not raw_result.strip():
+            raise ValueError(
+                f"required result for parent {parent_id!r} must be a non-empty string"
+            )
+        normalized[parent_id] = raw_result.strip()
+    return normalized
+
+
+def _task_dependency_contract(conn: sqlite3.Connection, task_id: str) -> dict[str, Optional[str]]:
+    """``{parent_id: required_parent_result}`` for every direct parent edge."""
+    rows = conn.execute(
+        "SELECT parent_id, required_parent_result FROM task_links WHERE child_id = ?",
+        (task_id,),
+    ).fetchall()
+    return {row["parent_id"]: row["required_parent_result"] for row in rows}
 
 
 def _missing_task_ids(conn: sqlite3.Connection, ids: Iterable[str]) -> list[str]:
@@ -1537,6 +1603,7 @@ def link_tasks(
     child_id: str,
     *,
     expected_child_run_id: Optional[int] = None,
+    required_parent_result: Optional[str] = None,
 ) -> bool:
     """Link ``parent_id -> child_id``. Returns True when the link gated a
     ``ready`` child back to ``todo`` (the new parent is not yet terminal), so
@@ -1546,7 +1613,11 @@ def link_tasks(
     rather than record a dependency that did not constrain the active run. The
     owning worker may link its own active run for a subsequent dependency-block
     handoff by supplying its trusted ``expected_child_run_id``.
+
+    ``required_parent_result`` gates the edge on the parent being ``done`` with
+    exactly that ``tasks.result``; ``None`` keeps the done/archived gate.
     """
+    required_parent_result = _normalize_required_parent_result(required_parent_result)
     if parent_id == child_id:
         raise ValueError("a task cannot depend on itself")
     gated = False
@@ -1564,10 +1635,10 @@ def link_tasks(
             raise ValueError(f"cannot link {parent_id} -> {child_id}: child is already running")
         if _would_cycle(conn, parent_id, child_id):
             raise ValueError(f"linking {parent_id} -> {child_id} would create a cycle")
-        _link(conn, parent_id, child_id)
-        # If child was ready but parent is not yet terminal, demote child to todo
-        # (archived counts as terminal, matching _parents_satisfied/recompute_ready).
-        if _task_status(conn, parent_id) not in ("done", "archived"):
+        _link(conn, parent_id, child_id, required_parent_result)
+        # If child was ready but the new edge is unsatisfied, demote child to todo
+        # (same predicate as _parents_satisfied/recompute_ready).
+        if any(pid == parent_id for pid, _status in unsatisfied_parents(conn, child_id)):
             cur = conn.execute(
                 "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
                 (child_id,),
@@ -1584,7 +1655,8 @@ def link_tasks(
             conn,
             child_id,
             "linked",
-            {"parent": parent_id, "child": child_id},
+            {"parent": parent_id, "child": child_id,
+             "required_parent_result": required_parent_result},
         )
         _inherit_notify_subs(conn, child_id, (parent_id,))
     return gated
@@ -2034,7 +2106,7 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
 
 
 def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) -> int:
-    """Promote ``todo``/``blocked`` tasks whose parents are all done/archived;
+    """Promote ``todo``/``blocked`` tasks whose parent edges are all satisfied;
     returns the count. Opens its own IMMEDIATE txn — call OUTSIDE any write txn.
 
     ``blocked`` is skipped when sticky (explicit ``kanban_block``) or when
@@ -2059,12 +2131,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
                 # Explicit human-intervention block; only ``unblock_task`` may exit it.
                 continue
-            parents = conn.execute(
-                "SELECT t.status FROM tasks t "
-                "JOIN task_links l ON l.parent_id = t.id "
-                "WHERE l.child_id = ?", (task_id,),
-            ).fetchall()
-            if all(p["status"] in ("done", "archived") for p in parents):
+            if _parents_satisfied(conn, task_id):
                 resume_status = _resume_status_from_events(conn, task_id)
                 if cur_status == "blocked":
                     # At the breaker limit, no auto-recovery (else block ->
@@ -2097,25 +2164,34 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int | None = None) 
 
 # --- Claim / complete / block ---
 
+# A NULL predicate keeps the legacy done/archived gate. A result-gated edge
+# fails closed: only 'done' with an exact tasks.result match satisfies it.
+_EDGE_UNSATISFIED_SQL = (
+    "CASE WHEN l.required_parent_result IS NULL "
+    "THEN p.status NOT IN ('done', 'archived') "
+    "ELSE NOT (p.status = 'done' AND p.result IS l.required_parent_result) END"
+)
+
+
 def _parents_satisfied(conn: sqlite3.Connection, task_id: str) -> bool:
-    """Return whether every direct parent is terminal for dependency gating."""
+    """Return whether every direct parent edge is satisfied for dependency gating."""
     return conn.execute(
         "SELECT 1 FROM task_links l "
         "JOIN tasks p ON p.id = l.parent_id "
-        "WHERE l.child_id = ? "
-        "AND p.status NOT IN ('done', 'archived') LIMIT 1", (task_id,),
+        f"WHERE l.child_id = ? AND {_EDGE_UNSATISFIED_SQL} LIMIT 1", (task_id,),
     ).fetchone() is None
 
 
 def unsatisfied_parents(conn: sqlite3.Connection, task_id: str) -> list[tuple[str, str]]:
     """``(parent_id, status)`` for every direct parent :func:`_parents_satisfied`
-    still counts as open (``done`` / ``archived`` release the child), in id
-    order, so a refusal or a board view can name the blockers instead of the
-    caller guessing. Read-only."""
+    still counts as open (``done`` / ``archived`` release a plain edge; a
+    result-gated edge needs ``done`` plus the exact result), in id order, so a
+    refusal or a board view can name the blockers instead of the caller
+    guessing. Read-only."""
     rows = conn.execute(
         "SELECT p.id, p.status FROM task_links l "
         "JOIN tasks p ON p.id = l.parent_id "
-        "WHERE l.child_id = ? AND p.status NOT IN ('done', 'archived') "
+        f"WHERE l.child_id = ? AND {_EDGE_UNSATISFIED_SQL} "
         "ORDER BY p.id", (task_id,),
     ).fetchall()
     return [(row["id"], row["status"]) for row in rows]
@@ -3495,12 +3571,7 @@ def promote_task(
     # No override: claim_task demotes ready -> todo on an undone parent whichever
     # writer set 'ready', so a forced promotion would only report a success the
     # first claim silently reverts (#106195). The dependency itself is the knob.
-    parents = conn.execute(
-        "SELECT t.id, t.status FROM tasks t "
-        "JOIN task_links l ON l.parent_id = t.id "
-        "WHERE l.child_id = ?", (task_id,),
-    ).fetchall()
-    unsatisfied = [p["id"] for p in parents if p["status"] not in ("done", "archived")]
+    unsatisfied = [pid for pid, _status in unsatisfied_parents(conn, task_id)]
     if unsatisfied:
         return False, (
             f"unsatisfied parent dependencies: {', '.join(unsatisfied)} "

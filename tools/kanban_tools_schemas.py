@@ -410,10 +410,20 @@ KANBAN_CREATE_SCHEMA = _schema(
             "items": {"type": "string"},
             "description": (
                 "Parent task ids. The new task stays in 'todo' "
-                "until every parent reaches 'done'; then it "
+                "until every parent dependency is satisfied; then it "
                 "auto-promotes to 'ready'. Typical fan-in: list "
                 "all the researcher task ids when creating a "
                 "synthesizer task."
+            ),
+        },
+        "required_parent_results": {
+            "type": "object",
+            "additionalProperties": {"type": "string"},
+            "description": (
+                "Optional map of parent task id to the exact "
+                "machine-readable tasks.result required while that "
+                "parent is done. Omitted parents keep the ordinary "
+                "done/archived dependency behavior."
             ),
         },
         "tenant": _prop("string", (
@@ -538,14 +548,21 @@ KANBAN_LINK_SCHEMA = _schema(
     "kanban_link",
     (
         "Add a parent→child dependency edge after both tasks already "
-        "exist. The child won't promote to 'ready' until all parents "
-        "are 'done'. Cycles and self-links are rejected. A running child "
+        "exist. The child won't promote to 'ready' until all dependency "
+        "edges are satisfied. Cycles and self-links are rejected. A running child "
         "is rejected unless the active owning worker is linking its own "
         "card for a dependency handoff."
     ),
     {
         "parent_id": {"type": "string", "description": "Parent task id."},
         "child_id":  {"type": "string", "description": "Child task id."},
+        "required_parent_result": {
+            "type": "string",
+            "description": (
+                "Optional exact machine-readable result required from "
+                "the parent while it is done."
+            ),
+        },
     },
     ["parent_id", "child_id"],
 )

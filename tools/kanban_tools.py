@@ -1130,6 +1130,9 @@ def _handle_create(args: dict, **kw) -> str:
     model_override, provider_override = args.get("model"), args.get("provider")
     _check(model_override or not provider_override, "'provider' requires 'model' to be set as well")
     parents = _coerce_str_list(args.get("parents") or [], "parents", "task ids")
+    required_parent_results = args.get("required_parent_results") or {}
+    _check(isinstance(required_parent_results, dict),
+           "required_parent_results must be an object mapping parent ids to exact result strings")
     with _board(args.get("board")) as (kb, conn):
         from gateway.session_context import get_session_env
         from tools.async_delegation import _current_origin_session_id
@@ -1150,7 +1153,8 @@ def _handle_create(args: dict, **kw) -> str:
         new_tid = kb.create_task(
             conn, title=_redact(str(title).strip()), body=_redact_opt(args.get("body")),
             assignee=str(assignee),
-            parents=tuple(parents), tenant=args.get("tenant") or os.environ.get("HERMES_TENANT"),
+            parents=tuple(parents), required_parent_results=required_parent_results,
+            tenant=args.get("tenant") or os.environ.get("HERMES_TENANT"),
             priority=_opt_int(args.get("priority"), 0),
             workspace_kind=workspace_kind, workspace_path=workspace_path, project_id=project_id,
             # Board-project inheritance must read the board this call opened, not the
@@ -1301,7 +1305,8 @@ def _handle_link(args: dict, **kw) -> str:
     with _board(args.get("board")) as (kb, conn):
         gated = kb.link_tasks(
             conn, parent_id=parent_id, child_id=child_id,
-            expected_child_run_id=_worker_run_id(str(child_id)))
+            expected_child_run_id=_worker_run_id(str(child_id)),
+            required_parent_result=args.get("required_parent_result"))
         return _ok(parent_id=parent_id, child_id=child_id, gated=gated,
                    **({"gated_by": parent_id} if gated else {}))
 
