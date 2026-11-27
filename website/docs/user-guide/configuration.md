@@ -2362,6 +2362,13 @@ agent:
   post_tool_placeholder_nudge: true
 ```
 
+`agent.false_stop_detection` (default `off`) is an opt-in detector for a false stop after a tool round. When an assistant tool-call row is in the current turn and the model stops with no tool call on text that announces the next action, Hermes keeps the reply as an interim row and sends a "make the actual tool call now" nudge. Two shapes match: a short reply (under 120 characters) that ends on a colon ("Next I will run the tests:"), and a reply of at most 200 characters that ends on CJK sentence punctuation, `;` or `…` and has an intent marker ("接下来", "let me", "I'll", ...) but no done, waiting or question marker. It has its own budget of 2 nudges, which resets after each tool round and at the end of the turn. Values: `off`, `on`, or `auto` (on, except on messaging surfaces such as Telegram or Discord). With the default `off` the turn ends on the reply as before:
+
+```yaml
+agent:
+  false_stop_detection: "on"
+```
+
 The same gate also enables **result-reference stubbing**: when a re-issued identical tool call returns a byte-identical fresh result, the duplicate payload enters context as a short reference stub pointing at the earlier result (tool name, `tool_call_id`, an args summary, and — if the first result was persisted to disk — its spillover path) instead of repeating the full output. The tool still executes every time, so polling semantics are preserved: a changed result always flows through whole. Results under 512 characters, error results, and multimodal results are never stubbed, and pollers *are* stubbed (an unchanged poll is exactly the case where the duplicate payload carries no information).
 
 ### Turn liveness watchdog
